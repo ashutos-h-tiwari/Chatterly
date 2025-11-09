@@ -11,106 +11,100 @@ import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
-import { apiLimiter } from "./middlewares/rateLimiter.js"; // see safeLimiter wrapper below
+import { apiLimiter } from "./middlewares/rateLimiter.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import { initSocket } from "./utils/socketUtils.js";
 
 dotenv.config();
 
-// ===== ES modules __dirname fix =====
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
 
-// ===== CORS + Helmet (must be BEFORE routes & before any rate-limiter) =====
-const ORIGIN = process.env.FRONTEND_ORIGIN || "*";
-
-/**
- * Helmet: allow cross-origin images (for avatars served from /uploads or CDN).
- * Default CORP is "same-origin", which can block <img>/NetworkImage on web.
- */
+// ---------- Helmet (allow cross-origin images like avatars) ----------
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
   })
 );
 
-/**
- * CORS: explicitly allow Authorization header and handle OPTIONS for all routes.
- */
+// ---------- CORS: reflect origin + allow Authorization ----------
 const corsOptions = {
-  origin: ORIGIN, // e.g. "http://localhost:62267" during dev, or "*" if you don't use cookies
+  origin: true, // reflect the request origin (safer than hardcoding localhost port)
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type"],
-  credentials: false, // set true only if you use cookies/sessions
+  allowedHeaders: [
+    "Authorization",
+    "authorization",
+    "Content-Type",
+    "content-type",
+  ],
+  credentials: false,
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // IMPORTANT: reply to all preflight
+// Respond to ALL preflights BEFORE anything else
+app.options("*", cors(corsOptions), (_req, res) => res.sendStatus(204));
 
-// ===== Body parser (after CORS) =====
+// ---------- Body parser ----------
 app.use(express.json({ limit: "1mb" }));
 
-/**
- * (Optional but recommended)
- * If your existing apiLimiter throttles OPTIONS, wrap/replace it with this safe version
- * or update your limiter to `skip: (req) => req.method === 'OPTIONS'`.
- */
+// ---------- Rate limiter: do NOT throttle OPTIONS ----------
 const safeLimiter = (req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   return apiLimiter(req, res, next);
 };
 app.use(safeLimiter);
 
-// ===== Static files (avatars, etc.) =====
+// (Optional) extra safety: ensure headers always present
+app.use((req, res, next) => {
+  const origin = req.headers.origin || "*";
+  res.header("Access-Control-Allow-Origin", origin);
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Authorization,authorization,Content-Type,content-type"
+  );
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  return next();
+});
+
+// ---------- Static files ----------
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// ===== API Routes =====
+// ---------- Routes ----------
 console.log("📍 Registering API routes...");
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 console.log("📍 Chat routes registered at /api/chat");
 
-// Root check
-app.get("/", (_req, res) => {
-  res.send("✅ Chat backend is running...");
-});
+app.get("/", (_req, res) => res.send("✅ Chat backend is running..."));
 
-// Debug registered route paths (optional)
-if (app._router && app._router.stack) {
-  app._router.stack.forEach((r) => {
-    if (r.route && r.route.path) {
-      console.log("📍 Route:", r.route.path);
-    }
-  });
-}
-
-// ===== Error handler (after routes) =====
+// ---------- Error handler ----------
 app.use(errorHandler);
 
-// ===== Socket.IO with matching CORS =====
+// ---------- Socket.IO with matching CORS ----------
 const io = new IOServer(server, {
   cors: {
-    origin: ORIGIN,
+    origin: true,
     methods: ["GET", "POST"],
     allowedHeaders: ["Authorization", "Content-Type"],
   },
 });
 initSocket(io);
 
-// ===== Start server after DB connect =====
+// ---------- Start ----------
 const PORT = process.env.PORT || 5000;
-
 connectDB(process.env.MONGO_URI)
   .then(() => {
     server.listen(PORT, () =>
       console.log(`🚀 Server listening on http://localhost:${PORT}`)
     );
   })
-  .catch((err) => {
-    console.error("❌ MongoDB connection failed:", err.message);
-  });
+  .catch((err) => console.error("❌ MongoDB connection failed:", err.message));
