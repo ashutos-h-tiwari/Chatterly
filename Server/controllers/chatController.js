@@ -11,32 +11,40 @@ export const createOrGetConversation = async (req, res) => {
     if (!participantId)
       return res.status(400).json({ message: "participantId is required" });
 
-    let conversation = await Conversation.findOne({
-      participants: { $all: [req.user._id, participantId] },
-    })
+    const a = req.user._id.toString();
+    const b = participantId.toString();
+    const [u1, u2] = [a, b].sort();
+    const pairKey = `${u1}:${u2}`;
+
+    // Single atomic upsert (race-safe)
+    const convo = await Conversation.findOneAndUpdate(
+      { pairKey },
+      { $setOnInsert: { participants: [u1, u2], pairKey } },
+      { new: true, upsert: true }
+    )
       .populate("participants", "name email avatar")
       .populate({
         path: "lastMessage",
         populate: { path: "sender", select: "name email avatar" },
       });
 
-    if (!conversation) {
-      conversation = new Conversation({
-        participants: [req.user._id, participantId],
-      });
-      await conversation.save();
-      conversation = await conversation.populate(
-        "participants",
-        "name email avatar"
-      );
-    }
-
-    return res.status(200).json(conversation);
+    return res.status(200).json(convo);
   } catch (err) {
-    console.error("❌ Error in createOrGetConversation:", err.message);
+    // If unique index races once, fetch again
+    if (err?.code === 11000) {
+      const again = await Conversation.findOne({ pairKey })
+        .populate("participants", "name email avatar")
+        .populate({
+          path: "lastMessage",
+          populate: { path: "sender", select: "name email avatar" },
+        });
+      return res.status(200).json(again);
+    }
+    console.error("❌ createOrGetConversation:", err);
     return res.status(500).json({ error: "Failed to create or get conversation" });
   }
 };
+
 
 // ✅ Get all conversations
 export const getConversations = async (req, res) => {

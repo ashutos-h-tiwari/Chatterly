@@ -1,6 +1,7 @@
 import express from "express";
 import { auth } from "../middlewares/authMiddleware.js";
-import upload from "../middlewares/upload.js"; // ✅ Cloudinary upload middleware
+import upload from "../middlewares/upload.js";
+
 import {
   createOrGetConversation,
   getConversations,
@@ -13,19 +14,27 @@ const router = express.Router();
 // ✅ All routes require authentication
 router.use(auth);
 
-// ✅ Create or get conversation
-router.post("/conversation", createOrGetConversation);
+/* ---------------------------------------------------
+   🗨️ Conversations
+--------------------------------------------------- */
 
-// ✅ Get all user conversations
+// ✅ Create or Get 1-on-1 Conversation (idempotent, upsert)
+router.post("/conversations", createOrGetConversation);
+
+// ✅ Get all user conversations (sorted by updatedAt desc)
 router.get("/conversations", getConversations);
 
-// ✅ Get all messages for a specific conversation
+/* ---------------------------------------------------
+   💬 Messages
+--------------------------------------------------- */
+
+// ✅ Get all messages of a conversation
 router.get("/conversations/:conversationId/messages", getMessages);
 
-// ✅ Send new message (text + optional Cloudinary file)
+// ✅ Send a new message (text + optional Cloudinary upload)
 router.post(
   "/conversations/:conversationId/messages",
-  upload.single("attachment"),
+  upload.single("attachment"), // optional file
   sendMessage
 );
 
