@@ -1,10 +1,11 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+// import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'FrontEnd/SplashScreen/SplashScreen.dart';
 
-
-void main() {
-
+void main(){
+  // WidgetsFlutterBinding.ensureInitialized();
+  // await dotenv.load(fileName:".env");
 
   runApp(MyApp());
 }

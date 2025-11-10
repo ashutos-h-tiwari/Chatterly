@@ -1,12 +1,13 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'dart:ui';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'dart:io';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'Signup.dart';
 import '../HomePage/HomePage.dart';
-
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -19,9 +20,13 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   final _nameController = TextEditingController();
   final _passwordController = TextEditingController();
 
+  // Login endpoint
+  static const String kLoginUrl = 'https://chatterly-auth-api.onrender.com/api/auth/login';
+
   bool _showPortal = true;
   bool _showIntro = false;
   bool _isLoading = false;
+  bool _obscure = true;
 
   late AnimationController _introController;
   late Animation<double> _sutraScale;
@@ -45,15 +50,16 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       CurvedAnimation(parent: _introController, curve: const Interval(0.15, 1.0, curve: Curves.easeIn)),
     );
 
-    _introController.addStatusListener((status) {
+    _introController.addStatusListener((status) async {
       if (status == AnimationStatus.completed) {
+        if (!mounted) return;
         setState(() => _isLoading = false);
-        Future.delayed(const Duration(seconds: 1), () {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (context) => const HomePage()),
-          );
-        });
+        await Future.delayed(const Duration(seconds: 1));
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const HomePage()),
+        );
       }
     });
   }
@@ -66,11 +72,27 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     super.dispose();
   }
 
+  // --- NEW: decode JWT to extract userId (sub/id/userId) ---
+  String? _extractUserIdFromJwt(String jwt) {
+    try {
+      final parts = jwt.split('.');
+      if (parts.length != 3) return null;
+
+      final payload = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final map = jsonDecode(payload) as Map<String, dynamic>;
+
+      final id = map['sub'] ?? map['id'] ?? map['userId'];
+      return id?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _threadIn() async {
-    final name = _nameController.text.trim();
+    final email = _nameController.text.trim();
     final pass = _passwordController.text.trim();
 
-    if (name.isEmpty || pass.isEmpty) {
+    if (email.isEmpty || pass.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Please fill in all fields")),
       );
@@ -80,49 +102,63 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     setState(() => _isLoading = true);
 
     try {
-      final response = await http.post(
-        Uri.parse("https://chatterly-auth-api.onrender.com/api/auth/login"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"username": name, "password": pass}),
-      );
+      final uri = Uri.parse(kLoginUrl);
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      final resp = await http
+          .post(
+        uri,
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+        },
+        body: jsonEncode({"email": email, "password": pass}),
+      )
+          .timeout(const Duration(seconds: 20));
 
-        if (data["success"] == true) {
-          // ✅ Login successful
-          final token = data["token"];
-          final user = data["user"];
+      Map<String, dynamic>? data;
+      try {
+        data = jsonDecode(resp.body) as Map<String, dynamic>?;
+      } catch (_) {}
 
-          // Optionally store token
+      if (resp.statusCode == 200) {
+        final token = data?["token"]?.toString();
+        if (token == null || token.isEmpty) {
+          _showError("Login failed: token missing");
+        } else {
           final prefs = await SharedPreferences.getInstance();
-          await prefs.setString("token", token ?? "");
+          await prefs.setString("token", token);
 
+          // NEW: derive & store my userId for rooms/messages etc.
+          final myId = _extractUserIdFromJwt(token);
+          if (myId != null && myId.isNotEmpty) {
+            await prefs.setString("userId", myId);
+          }
+
+          if (!mounted) return;
           setState(() {
-            _welcomeName = user?["name"] ?? name;
+            _welcomeName = email; // you can replace with /me later
             _showPortal = false;
             _showIntro = true;
           });
-
           _introController.forward();
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(data["message"] ?? "Invalid credentials")),
-          );
-          setState(() => _isLoading = false);
         }
+      } else if (resp.statusCode == 401) {
+        _showError(data?["message"] ?? "Invalid email or password");
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Server error: ${response.statusCode}")),
-        );
-        setState(() => _isLoading = false);
+        _showError(data?["message"] ?? "Server error: ${resp.statusCode}");
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Network error: $e")),
-      );
-      setState(() => _isLoading = false);
+      _showError("Network error: $e");
+    } finally {
+      if (mounted && !_showIntro) {
+        setState(() => _isLoading = false);
+      }
     }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
@@ -139,7 +175,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       backgroundColor: bgDeep1,
       body: Stack(
         children: [
-          Positioned.fill(child: StarryBackground()),
+          const Positioned.fill(child: StarryBackground()),
 
           // Outer glow portal ring
           Positioned.fill(
@@ -147,9 +183,9 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
               child: Container(
                 width: portalDiameter * 1.32,
                 height: portalDiameter * 1.32,
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: const RadialGradient(
+                  gradient: RadialGradient(
                     colors: [
                       Color.fromRGBO(255, 215, 100, 0.20),
                       Color.fromRGBO(255, 215, 100, 0.09),
@@ -159,7 +195,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: const Color.fromRGBO(255, 215, 100, 0.23),
+                      color: Color.fromRGBO(255, 215, 100, 0.23),
                       blurRadius: 64,
                       spreadRadius: 12,
                     ),
@@ -169,7 +205,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
             ),
           ),
 
-          // 🌀 Portal Login Form
+          // Portal Login Form
           if (_showPortal)
             Center(
               child: ClipRRect(
@@ -190,8 +226,8 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                         end: Alignment.bottomCenter,
                       ),
                       border: Border.all(color: Colors.white.withOpacity(0.04)),
-                      boxShadow: [
-                        const BoxShadow(
+                      boxShadow: const [
+                        BoxShadow(
                           color: Color.fromRGBO(6, 8, 20, 0.6),
                           offset: Offset(0, 30),
                           blurRadius: 80,
@@ -229,12 +265,13 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                   ),
                                   const SizedBox(height: 20),
 
-                                  // Username field
+                                  // Email field (API expects email)
                                   TextField(
                                     controller: _nameController,
                                     style: TextStyle(color: mutedColor),
+                                    textInputAction: TextInputAction.next,
                                     decoration: InputDecoration(
-                                      hintText: "Your name...",
+                                      hintText: "Email",
                                       filled: true,
                                       fillColor: Colors.white.withOpacity(0.02),
                                       contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
@@ -253,7 +290,8 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                   // Password field
                                   TextField(
                                     controller: _passwordController,
-                                    obscureText: true,
+                                    obscureText: _obscure,
+                                    onSubmitted: (_) => _isLoading ? null : _threadIn(),
                                     style: TextStyle(color: mutedColor),
                                     decoration: InputDecoration(
                                       hintText: "Secret thread",
@@ -267,6 +305,10 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                       focusedBorder: OutlineInputBorder(
                                         borderRadius: BorderRadius.circular(999),
                                         borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                                      ),
+                                      suffixIcon: IconButton(
+                                        onPressed: () => setState(() => _obscure = !_obscure),
+                                        icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
                                       ),
                                     ),
                                   ),
@@ -317,7 +359,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
               ),
             ),
 
-          // ✨ Intro Animation (SUTRA)
+          // Intro Animation (SUTRA)
           if (_showIntro)
             Center(
               child: FadeTransition(
@@ -383,7 +425,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   }
 }
 
-// 🌠 STAR BACKGROUND (same as yours)
+// STAR BACKGROUND (unchanged)
 class StarryBackground extends StatefulWidget {
   const StarryBackground({super.key});
 

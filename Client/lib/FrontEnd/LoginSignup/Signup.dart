@@ -3,7 +3,7 @@ import 'dart:math';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-
+// import 'package:flutter_dotenv/flutter_dotenv.dart';
 import '../HomePage/HomePage.dart';
 import 'Login.dart';
 
@@ -24,7 +24,7 @@ class _SignupPageState extends State<SignupPage> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
 
-  final String signupUrl = 'https://chatterly-auth-api.onrender.com/api/auth/signup';
+  final String signupUrl = 'https://chatterly-backend-f9j0.onrender.com/api/auth/signup';
 
   Future<void> _signUp() async {
     if (!_formKey.currentState!.validate()) return;
