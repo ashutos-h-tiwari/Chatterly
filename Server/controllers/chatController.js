@@ -1,10 +1,11 @@
 // controllers/chatController.js
 import Conversation from "../models/Conversation.js";
 import Message from "../models/Message.js";
-import User from "../models/User.js";
 import { emitMessageToRoom } from "../utils/socketUtils.js";
 
-// ✅ Create or Get a Conversation
+/**
+ * Create or Get a 1-1 Conversation (atomic, race-safe via pairKey)
+ */
 export const createOrGetConversation = async (req, res) => {
   try {
     const { participantId } = req.body;
@@ -16,7 +17,6 @@ export const createOrGetConversation = async (req, res) => {
     const [u1, u2] = [a, b].sort();
     const pairKey = `${u1}:${u2}`;
 
-    // Single atomic upsert (race-safe)
     const convo = await Conversation.findOneAndUpdate(
       { pairKey },
       { $setOnInsert: { participants: [u1, u2], pairKey } },
@@ -30,7 +30,6 @@ export const createOrGetConversation = async (req, res) => {
 
     return res.status(200).json(convo);
   } catch (err) {
-    // If unique index races once, fetch again
     if (err?.code === 11000) {
       const again = await Conversation.findOne({ pairKey })
         .populate("participants", "name email avatar")
@@ -41,15 +40,20 @@ export const createOrGetConversation = async (req, res) => {
       return res.status(200).json(again);
     }
     console.error("❌ createOrGetConversation:", err);
-    return res.status(500).json({ error: "Failed to create or get conversation" });
+    return res
+      .status(500)
+      .json({ error: "Failed to create or get conversation" });
   }
 };
 
-
-// ✅ Get all conversations
+/**
+ * Get all conversations for the user
+ */
 export const getConversations = async (req, res) => {
   try {
-    const conversations = await Conversation.find({ participants: req.user._id })
+    const conversations = await Conversation.find({
+      participants: req.user._id,
+    })
       .populate("participants", "name email avatar")
       .populate({
         path: "lastMessage",
@@ -64,12 +68,15 @@ export const getConversations = async (req, res) => {
   }
 };
 
-// ✅ Get all messages in a conversation
+/**
+ * Get messages in a conversation
+ * NOTE: For E2EE we return cipherText + contentType; client decrypts locally.
+ */
 export const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
 
-    // Optional: authorize that user is in this conversation
+    // authorize membership
     const exists = await Conversation.exists({
       _id: conversationId,
       participants: req.user._id,
@@ -79,6 +86,9 @@ export const getMessages = async (req, res) => {
     }
 
     const messages = await Message.find({ conversationId })
+      .select(
+        "_id conversationId sender cipherText contentType text clientId attachments attachmentUrl attachmentSize attachmentNonce attachmentTag createdAt"
+      )
       .populate("sender", "name email avatar")
       .sort({ createdAt: 1 });
 
@@ -89,15 +99,31 @@ export const getMessages = async (req, res) => {
   }
 };
 
-// ✅ Send message (HTTP) — now also broadcasts to Socket.IO room
+/**
+ * Send message (E2EE-first):
+ * - Expect { cipherText, contentType, clientId }
+ * - Optional legacy { text } during migration (not recommended long-term)
+ * - Optional file via `upload.single('attachment')` which should be ALREADY encrypted client-side.
+ */
 export const sendMessage = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { text, clientId } = req.body; // clientId from app (tempId)
-    if (!conversationId)
-      return res.status(400).json({ message: "Conversation ID is required" });
-    if (!text && !req.file)
-      return res.status(400).json({ message: "Text or attachment is required" });
+
+    // E2EE fields
+    const { cipherText, contentType, clientId } = req.body;
+
+    // Legacy plaintext (migration only)
+    const plaintext = req.body.text;
+
+    // Attachment (should be encrypted before upload)
+    const attachmentUrl = req.file ? req.file.path : null;
+
+    if (!cipherText && !plaintext && !attachmentUrl) {
+      return res.status(400).json({
+        success: false,
+        message: "cipherText required (or legacy text / encrypted attachment)",
+      });
+    }
 
     // authorize membership
     const conv = await Conversation.findOne({
@@ -105,45 +131,48 @@ export const sendMessage = async (req, res) => {
       participants: req.user._id,
     });
     if (!conv) {
-      return res.status(403).json({ message: "Access denied to conversation" });
+      return res
+        .status(403)
+        .json({ success: false, message: "Access denied to conversation" });
     }
 
-    const attachmentUrl = req.file ? req.file.path : null;
-
-    // 1) persist
-    const newMessage = await Message.create({
+    // Persist
+    const doc = await Message.create({
       conversationId,
       sender: req.user._id,
-      text,
+      cipherText: cipherText || null,
+      contentType: cipherText
+        ? contentType || "signal:whisper"
+        : attachmentUrl
+        ? "signal:attachment"
+        : "legacy:plaintext",
+      text: plaintext || undefined, // avoid storing long-term; only for transition
+      clientId: clientId || null,
       attachments: attachmentUrl ? [attachmentUrl] : [],
-      clientId: clientId || null, // <-- add this field in Message schema (String, index optional)
     });
 
-    // 2) update conversation metadata
     await Conversation.findByIdAndUpdate(conversationId, {
-      lastMessage: newMessage._id,
+      lastMessage: doc._id,
       updatedAt: new Date(),
     });
 
-    // 3) shape payload for clients
-    const populatedMessage = await Message.findById(newMessage._id)
-      .populate("sender", "name email avatar");
-
+    // Payload for clients (NEVER include plaintext if cipherText exists)
     const payload = {
-      _id: populatedMessage._id,
-      text: populatedMessage.text || "",
-      sender: populatedMessage.sender, // {_id, name, ...}
-      attachments: populatedMessage.attachments || [],
-      createdAt: populatedMessage.createdAt,
+      _id: doc._id,
+      cipherText: doc.cipherText || null,
+      contentType: doc.contentType,
+      text: doc.cipherText ? undefined : doc.text || "", // legacy only
+      sender: { _id: req.user._id },
+      attachments: doc.attachments || [],
+      createdAt: doc.createdAt,
       conversationId,
-      clientId: populatedMessage.clientId || null,
+      clientId: doc.clientId || null,
       status: "sent",
     };
 
-    // 4) realtime broadcast to room (so both users see instantly)
+    // Realtime broadcast
     emitMessageToRoom(conversationId, payload);
 
-    // 5) HTTP response
     return res.status(201).json({
       success: true,
       message: "Message sent successfully",

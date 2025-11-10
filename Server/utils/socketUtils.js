@@ -1,4 +1,3 @@
-// utils/socketUtils.js
 import jwt from "jsonwebtoken";
 
 let ioRef = null;
@@ -9,29 +8,22 @@ export const initSocket = (io) => {
 
   io.on("connection", async (socket) => {
     try {
-      // ✅ accept token from both auth and query (Flutter sends query)
-      const token =
-        socket.handshake.auth?.token ||
-        socket.handshake.query?.token ||
-        null;
-
+      // Accept token from query or auth
+      const token = socket.handshake.auth?.token || socket.handshake.query?.token;
       if (!token) {
         console.warn("❌ No token provided, disconnecting");
         return socket.disconnect(true);
       }
-
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       socket.userId = decoded.id;
       console.log(`✅ Socket connected: ${socket.id} | User: ${socket.userId}`);
 
-      // Join a personal room (optional presence/DMs)
+      // Personal room (optional presence)
       socket.join(socket.userId);
       socket.broadcast.emit("user:online", { userId: socket.userId });
 
-      // Track joined conversations
       socket.joinedConversations = new Set();
 
-      // ✅ Support BOTH event names for compatibility
       const joinHandler = ({ conversationId, roomId }) => {
         const convId = conversationId || roomId;
         if (!convId) return;
@@ -39,7 +31,6 @@ export const initSocket = (io) => {
         socket.joinedConversations.add(convId);
         console.log(`🟢 User ${socket.userId} joined conversation ${convId}`);
       };
-
       const leaveHandler = ({ conversationId, roomId }) => {
         const convId = conversationId || roomId;
         if (!convId) return;
@@ -50,38 +41,9 @@ export const initSocket = (io) => {
 
       socket.on("join:conversation", joinHandler);
       socket.on("leave:conversation", leaveHandler);
-
-      // Backward-compat aliases (Flutter was emitting 'join')
+      // Back-compat aliases
       socket.on("join", joinHandler);
       socket.on("leave", leaveHandler);
-
-      // If client chooses to send via socket (optional)
-      socket.on("message:send", async (payload) => {
-        try {
-          const { conversationId } = payload || {};
-          if (!conversationId) {
-            return socket.emit("message:error", { message: "conversationId missing" });
-          }
-          if (!socket.joinedConversations.has(conversationId)) {
-            console.warn(
-              `⚠️ User ${socket.userId} sending to ${conversationId} before join — auto-joining`
-            );
-            socket.join(conversationId);
-            socket.joinedConversations.add(conversationId);
-          }
-
-          const { createMessageAndBroadcast } = await import("../services/socketService.js");
-          await createMessageAndBroadcast(io, {
-            ...payload,
-            senderId: socket.userId, // trust server auth
-          });
-
-          console.log(`📤 Socket message broadcasted to conversation ${conversationId}`);
-        } catch (err) {
-          console.error("❌ message:send error:", err.message);
-          socket.emit("message:error", { message: "Failed to send message" });
-        }
-      });
 
       socket.on("disconnect", () => {
         console.log(`❌ Socket disconnected: ${socket.id} | User: ${socket.userId}`);
@@ -94,9 +56,6 @@ export const initSocket = (io) => {
   });
 };
 
-/**
- * Helper: broadcast a message to a conversation room
- */
 export function emitMessageToRoom(conversationId, payload) {
   if (!ioRef || !conversationId) return;
   ioRef.to(conversationId.toString()).emit("message:new", payload);

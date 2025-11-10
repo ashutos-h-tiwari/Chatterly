@@ -38,6 +38,8 @@ dependencies:
   image_picker:
   path:
   socket_io_client:
+  libsignal_protocol_dart:
+  pointycastle:
 
 
   # The following adds the Cupertino Icons font to your application.
