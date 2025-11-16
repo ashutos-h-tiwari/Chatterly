@@ -167,16 +167,75 @@ export const initSocket = (io) => {
       });
 
       /* ============================================================
-         WEBRTC SIGNALING: call-user, answer-call, ice-candidate, end-call, decline
+         WEBRTC SIGNALING: call-initiate, call-user, answer-call, ice-candidate, end-call, decline
          Active-calls map prevents races and double-call in same conversation
          ============================================================ */
 
       /**
-       * CALL USER
-       * payload: { to, conversationId, offer }
-       * emits to callee: 'incoming-call'
+       * CALL INITIATE (lightweight notify/ringing)
+       * payload: { to, conversationId, fromName?, callType? }
+       * emits to callee: 'incoming-call' (without SDP/offer) so receiver can show ringing UI
        */
-      socket.on("call-user", async ({ to, conversationId, offer }) => {
+      socket.on("call-initiate", async ({ to, conversationId, fromName, callType }) => {
+        try {
+          if (!to || !conversationId) {
+            return socket.emit("call:error", { message: "Missing to/conversationId" });
+          }
+
+          // Validate conversation and participants (best-effort)
+          const conv = await Conversation.findById(conversationId).select("participants").lean();
+          if (!conv) return socket.emit("call:error", { message: "Conversation not found" });
+
+          const participants = conv.participants.map(String);
+          if (!participants.includes(String(socket.userId))) {
+            return socket.emit("call:error", { message: "You are not a participant in this conversation" });
+          }
+          if (!participants.includes(String(to))) {
+            return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
+          }
+
+          // Check callee online
+          const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
+          if (!calleeOnline) {
+            console.log(`📴 Callee ${to} is offline (initiate)`);
+            return socket.emit("callee-offline", { to });
+          }
+
+          // Mark conversation as active call (preliminary)
+          if (activeCalls.has(String(conversationId))) {
+            // still allow notify but also let caller know busy
+            socket.emit("call:busy", { conversationId });
+            return;
+          }
+
+          activeCalls.set(String(conversationId), {
+            callerId: socket.userId,
+            calleeId: to,
+            initiatedAt: Date.now(),
+            mode: callType || "voice",
+          });
+
+          console.log(`📲 ${socket.userId} initiated call (notify) -> ${to} (conv ${conversationId})`);
+
+          ioRef.to(String(to)).emit("incoming-call", {
+            from: socket.userId,
+            conversationId,
+            fromName: fromName || null,
+            callType: callType || "voice",
+            notifyOnly: true, // indicates no offer attached yet
+          });
+        } catch (err) {
+          console.error("❌ call-initiate error:", err?.message || err);
+          socket.emit("call:error", { message: "Failed to initiate call" });
+        }
+      });
+
+      /**
+       * CALL USER (full signaling with offer)
+       * payload: { to, conversationId, offer, callId? }
+       * emits to callee: 'incoming-call' (with offer)
+       */
+      socket.on("call-user", async ({ to, conversationId, offer, callId }) => {
         try {
           if (!to || !conversationId || !offer) {
             return socket.emit("call:error", {
@@ -199,7 +258,7 @@ export const initSocket = (io) => {
           // Check if callee online (user personal room exists)
           const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
           if (!calleeOnline) {
-            console.log(`📴 Callee ${to} is offline`);
+            console.log(`📴 Callee ${to} is offline (call-user)`);
             return socket.emit("callee-offline", { to });
           }
 
@@ -213,6 +272,7 @@ export const initSocket = (io) => {
             callerId: socket.userId,
             calleeId: to,
             startedAt: Date.now(),
+            callId: callId || null,
           });
 
           console.log(`📞 ${socket.userId} is calling ${to} (conversation ${conversationId})`);
@@ -221,6 +281,7 @@ export const initSocket = (io) => {
             from: socket.userId,
             conversationId,
             offer,
+            callId: callId || null,
           });
         } catch (err) {
           console.error("❌ call-user error:", err?.message || err);
