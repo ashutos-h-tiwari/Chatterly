@@ -39,7 +39,17 @@ dependencies:
   path:
   socket_io_client:
   libsignal_protocol_dart:
-  pointycastle:
+  flutter_secure_storage:
+  file_picker:
+  url_launcher:
+  photo_view:
+  dio:
+  flutter_staggered_grid_view:
+  path_provider:
+  permission_handler:
+  flutter_sound:
+  just_audio:
+  device_info_plus:
 
 
   # The following adds the Cupertino Icons font to your application.

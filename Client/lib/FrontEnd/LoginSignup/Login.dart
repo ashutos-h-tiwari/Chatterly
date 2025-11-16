@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:chatterly/Contants.dart';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'dart:ui';
@@ -21,7 +22,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   final _passwordController = TextEditingController();
 
   // Login endpoint
-  static const String kLoginUrl = 'https://chatterly-auth-api.onrender.com/api/auth/login';
+  static const String kLoginUrl = 'https://chatterly-backend-f9j0.onrender.com/api/auth/login';
 
   bool _showPortal = true;
   bool _showIntro = false;

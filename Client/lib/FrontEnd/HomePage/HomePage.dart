@@ -1,12 +1,14 @@
+// merged_threads_page.dart
 import 'dart:convert';
-
 import 'package:chatterly/FrontEnd/Allchat/AllChat.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../ChatPage/ChatPage.dart';
+import '../Status page/status.dart';
 import '../profile/profile.dart';
+import '../profile/profileupdate.dart';
+// import ''; // <-- UPDATE this import to your actual path
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -15,6 +17,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+/// NOTE: This file focuses on ThreadsPage UI + logic. The HomePage here is
+/// preserved from your original file to keep routing as-is.
 class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
@@ -22,14 +26,8 @@ class _HomePageState extends State<HomePage> {
       debugShowCheckedModeBanner: false,
       title: 'Sutra – Threads',
       theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF0F0F1A),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFB8A6FF),
-          secondary: Color(0xFFB8A6FF),
-          surface: Color(0xFF16162A),
-          onSurface: Color(0xFFF8F8F8),
-        ),
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: Colors.white,
         useMaterial3: true,
       ),
       home: const ThreadsPage(),
@@ -37,7 +35,7 @@ class _HomePageState extends State<HomePage> {
         '/chat': (context) {
           final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
           final userName = args?['name'] as String? ?? 'Chat';
-          final userId   = args?['id'] as String? ?? '';
+          final userId = args?['id'] as String? ?? '';
           return ChatPage(chatUserName: userName, chatUserId: userId);
         },
       },
@@ -52,35 +50,50 @@ class ThreadsPage extends StatefulWidget {
   State<ThreadsPage> createState() => _ThreadsPageState();
 }
 
-class _ThreadsPageState extends State<ThreadsPage> {
-  // 🔗 backend list endpoint (adjust if your route differs)
+class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin {
   static const String kBase = 'https://chatterly-backend-f9j0.onrender.com';
   static const String kListConversations = '$kBase/api/chat/conversations';
 
-  // 🔒 auth
   String? _token;
   String? _myId;
 
-  // ✅ threads for UI
   final List<ThreadItem> threads = [];
 
-  // state
   bool _loading = true;
   String? _error;
-
   bool showPopup = false;
+
+  late AnimationController _headerController;
+  late AnimationController _fabController;
 
   @override
   void initState() {
     super.initState();
+    _headerController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    )..forward();
+
+    _fabController = AnimationController(
+      duration: const Duration(milliseconds: 400),
+      vsync: this,
+    );
+
     _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    _headerController.dispose();
+    _fabController.dispose();
+    super.dispose();
   }
 
   Future<void> _bootstrap() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       _token = prefs.getString('token');
-      _myId  = prefs.getString('userId');
+      _myId = prefs.getString('userId');
 
       if (_token == null || _myId == null || _token!.isEmpty || _myId!.isEmpty) {
         setState(() {
@@ -116,10 +129,6 @@ class _ThreadsPageState extends State<ThreadsPage> {
       if (res.statusCode >= 200 && res.statusCode < 300) {
         final body = jsonDecode(res.body);
 
-        // Accept shapes:
-        // 1) [ {...}, ... ]
-        // 2) { conversations: [ ... ] }
-        // 3) { data: [ ... ] }
         List list = [];
         if (body is List) {
           list = body;
@@ -131,7 +140,6 @@ class _ThreadsPageState extends State<ThreadsPage> {
           throw const FormatException('Unexpected conversations payload');
         }
 
-        // Map conversations → ThreadItem
         final mapped = <ThreadItem>[];
         for (final raw in list) {
           final conv = _parseConversation(raw);
@@ -143,8 +151,8 @@ class _ThreadsPageState extends State<ThreadsPage> {
               conv.otherUserName,
               conv.lastText ?? 'Say hi 👋',
               img,
-              true, // online: not provided → keep UI consistent
-              id: conv.otherUserId, // ✅ important for ChatPage
+              true,
+              id: conv.otherUserId,
             ),
           );
         }
@@ -169,14 +177,9 @@ class _ThreadsPageState extends State<ThreadsPage> {
     }
   }
 
-  // Conversation parser → minimal info
   _ConvLite? _parseConversation(dynamic json) {
     if (json is! Map) return null;
 
-    // room id (unused here)
-    final _ = (json['_id'] ?? json['id'])?.toString();
-
-    // find the OTHER participant (not me)
     String? otherId;
     String? otherName;
 
@@ -195,14 +198,12 @@ class _ThreadsPageState extends State<ThreadsPage> {
       }
     }
 
-    // fallback if server gives a direct 'otherUser'
     if (otherId == null && json['otherUser'] is Map) {
       final ou = json['otherUser'] as Map;
       otherId = (ou['_id'] ?? ou['id'])?.toString();
       otherName = (ou['name'] ?? ou['username'] ?? ou['email'])?.toString();
     }
 
-    // last message preview
     String? lastText;
     final lm = json['lastMessage'];
     if (lm is Map) {
@@ -221,21 +222,17 @@ class _ThreadsPageState extends State<ThreadsPage> {
   }
 
   String _avatarFor(String name) {
-    // stable positive seed in 1..70
     final positive = (name.hashCode & 0x7fffffff);
     final seed = (positive % 70) + 1;
     return 'https://i.pravatar.cc/150?img=$seed';
   }
 
-  // ---------- Popup actions (logic only; UI same) ----------
   void _onNewThread() async {
     setState(() => showPopup = false);
-    // open your contacts/all-chats screen to pick a user to start a new thread
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const AllChatsPage()),
     );
-    // on return you can optionally refresh
     if (mounted) _loadConversations();
   }
 
@@ -252,307 +249,478 @@ class _ThreadsPageState extends State<ThreadsPage> {
       const SnackBar(content: Text('New Diary Entry: coming soon')),
     );
   }
-  // ---------------------------------------------------------
+
+  void _togglePopup() {
+    setState(() {
+      showPopup = !showPopup;
+    });
+    if (showPopup) {
+      _fabController.forward();
+    } else {
+      _fabController.reverse();
+    }
+  }
+
+  // ---------------------------
+  // UI (glowing style) below
+  // ---------------------------
 
   @override
   Widget build(BuildContext context) {
+    final accent = const Color(0xFFBFA2FF);
+
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.white.withOpacity(0.05),
-        elevation: 4,
-        shadowColor: const Color(0xFFB8A6FF).withOpacity(0.4),
-        title: const Text(
-          'Sutra',
-          style: TextStyle(
-            color: Color(0xFFB8A6FF),
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        centerTitle: false,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.person_outline, color: Color(0xFFB8A6FF), size: 26),
-            tooltip: 'Profile',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AllChatsPage()),
-              );
-            },
-          ),
-          const Padding(
-            padding: EdgeInsets.only(right: 16.0),
-            child: Center(
-              child: Text(
-                'Threads',
-                style: TextStyle(
-                  color: Color(0xFFF8F8F8),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              // Header (kept)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.05),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFFB8A6FF).withOpacity(0.3),
-                      blurRadius: 12,
-                    )
-                  ],
-                ),
-              ),
-
-              // Threads list (UI unchanged)
-              Expanded(child: _buildThreadsList()),
-
-              // Bottom nav (unchanged)
-              _BottomNav(onAdd: () => setState(() => showPopup = !showPopup)),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFF120A2A),
+              Color(0xFF311B6B),
+              Color(0xFFBFA2FF),
             ],
           ),
-
-          // Popup (unchanged visually; actions wired)
-          if (showPopup)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 90,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: const Color.fromRGBO(20, 20, 35, 0.95),
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFFB8A6FF).withOpacity(0.6),
-                        blurRadius: 12,
+        ),
+        child: SafeArea(
+          child: Stack(
+            children: [
+              Column(
+                children: [
+                  // Header (glowing)
+                  FadeTransition(
+                    opacity: _headerController,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0, -0.3),
+                        end: Offset.zero,
+                      ).animate(CurvedAnimation(
+                        parent: _headerController,
+                        curve: Curves.easeOutCubic,
+                      )),
+                      child: Padding(
+                        padding: const EdgeInsets.all(24.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Threads',
+                                  style: TextStyle(
+                                    fontSize: 36,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                    letterSpacing: -1,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '${threads.length} active conversations',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Colors.white.withOpacity(0.8),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                _HeaderButton(
+                                  icon: Icons.group_add,
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(builder: (_) => const AllChatsPage()),
+                                    );
+                                  },
+                                ),
+                                const SizedBox(width: 12),
+                                _HeaderButton(
+                                  icon: Icons.person_outline,
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(builder: (_) => const ProfileUpdatePage(initialName: 'Ashutosh', initialAbout: 'ram', phoneNumber: '9555548746',)),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                    ],
+                    ),
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _PopupButton(label: 'New Thread', onTap: _onNewThread),
-                      _PopupButton(label: 'New Group', onTap: _onNewGroup),
-                      _PopupButton(label: 'New Diary Entry', onTap: _onNewDiaryEntry),
-                    ],
+
+                  // Quick actions (kept your existing widget but styled)
+                  Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurpleAccent.withOpacity(1.0),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _QuickActionButton(
+                            label: 'All',
+                            icon: Icons.chat_bubble,
+                            selected: true,
+                            onTap: () {},
+                          ),
+                        ),
+                        Expanded(
+                          child: _QuickActionButton(
+                            label: 'story',
+                            icon: Icons.mark_chat_unread,
+                            badge: '3',
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const StoryPage(),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        Expanded(
+                          child: _QuickActionButton(
+                            label: 'Groups',
+                            icon: Icons.groups,
+                            onTap: () {},
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+
+                  // Threads list area
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: _buildThreadsListBody(),
+                    ),
+                  ),
+                ],
               ),
-            ),
-        ],
+
+              // Popup overlay
+              if (showPopup) _buildPopupMenuOverlay(),
+
+            ],
+          ),
+        ),
       ),
+      floatingActionButton: _buildFAB(),
     );
   }
 
-  Widget _buildThreadsList() {
+  Widget _buildThreadsListBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: CircularProgressIndicator(color: Colors.white));
     }
+
     if (_error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
-          child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
-        ),
-      );
-    }
-    if (threads.isEmpty) {
-      return const Center(
-        child: Text(
-          'No conversations yet',
-          style: TextStyle(color: Color(0xFFBFBFBF)),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 64, color: Colors.white70),
+              const SizedBox(height: 16),
+              Text(_error!, style: const TextStyle(color: Colors.indigo), textAlign: TextAlign.center),
+            ],
+          ),
         ),
       );
     }
 
-    // 👇 UI the same; using fetched `threads`
-    return ListView.separated(
-      padding: const EdgeInsets.all(20),
-      itemCount: threads.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 14),
-      itemBuilder: (context, index) {
-        final t = threads[index];
-        return GestureDetector(
-          onTap: () {
-            Navigator.pushNamed(
-              context,
-              '/chat',
-              arguments: {
-                'name': t.name,
-                'id': t.id, // ✅ pass user id to chat
-                'subtitle': t.subtitle,
-                'imageUrl': t.imageUrl,
-                'online': t.online,
-              },
-            );
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.05),
-              borderRadius: BorderRadius.circular(14),
+    if (threads.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.chat_bubble_outline, size: 64, color: Colors.white70),
+            const SizedBox(height: 16),
+            const Text('No conversations yet', style: TextStyle(color: Colors.white, fontSize: 16)),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: _onNewThread,
+              icon: const Icon(Icons.add, color: Colors.white),
+              label: const Text('Start a new thread', style: TextStyle(color: Colors.white)),
             ),
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: t.online
-                            ? const Color(0xFFB8A6FF)
-                            : const Color(0xFFB8A6FF).withOpacity(0.6),
-                        blurRadius: t.online ? 14 : 6,
-                      ),
-                    ],
-                    image: DecorationImage(
-                      image: NetworkImage(t.imageUrl),
-                      fit: BoxFit.cover,
-                    ),
-                  ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadConversations,
+      color: const Color(0xff0f766e),
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(0, 8, 0, 100),
+        itemCount: threads.length,
+        itemBuilder: (context, index) {
+          final thread = threads[index];
+          return TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.0, end: 1.0),
+            duration: Duration(milliseconds: 300 + (index * 40)),
+            curve: Curves.easeOut,
+            builder: (context, value, child) {
+              return Opacity(
+                opacity: value,
+                child: Transform.translate(
+                  offset: Offset(0, 20 * (1 - value)),
+                  child: child,
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        t.name,
-                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        t.subtitle,
-                        style: TextStyle(
-                          color: const Color(0xFFBFBFBF).withOpacity(0.9),
-                          fontSize: 13.5,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
+              );
+            },
+            child: _CompactThreadTile(
+              thread: thread,
+              onTap: () {
+                Navigator.pushNamed(
+                  context,
+                  '/chat',
+                  arguments: {
+                    'name': thread.name,
+                    'id': thread.id,
+                    'subtitle': thread.subtitle,
+                    'imageUrl': thread.imageUrl,
+                    'online': thread.online,
+                  },
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPopupMenuOverlay() {
+    return Positioned.fill(
+      child: GestureDetector(
+        onTap: _togglePopup,
+        child: Container(
+          color: Colors.black.withOpacity(0.5),
+          child: Center(
+            child: ScaleTransition(
+              scale: CurvedAnimation(parent: _fabController, curve: Curves.easeOutBack),
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 40),
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 20, offset: const Offset(0, 10))],
                 ),
-              ],
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Create New', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xff0f766e))),
+                    const SizedBox(height: 20),
+                    _PopupMenuItem(icon: Icons.chat_bubble, label: 'New Thread', color: const Color(0xff0f766e), onTap: _onNewThread),
+                    const SizedBox(height: 12),
+                    _PopupMenuItem(icon: Icons.group, label: 'New Group', color: const Color(0xff14b8a6), onTap: _onNewGroup),
+                    const SizedBox(height: 12),
+                    _PopupMenuItem(icon: Icons.book, label: 'New Diary Entry', color: const Color(0xff2dd4bf), onTap: _onNewDiaryEntry),
+                  ],
+                ),
+              ),
             ),
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFAB() {
+    return ScaleTransition(
+      scale: Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _headerController, curve: const Interval(0.5, 1.0, curve: Curves.elasticOut))),
+      child: FloatingActionButton(
+        onPressed: _togglePopup,
+        backgroundColor: Colors.white,
+        elevation: 8,
+        child: AnimatedRotation(
+          turns: showPopup ? 0.125 : 0,
+          duration: const Duration(milliseconds: 300),
+          child: const Icon(Icons.add, color: Color(0xff0f766e), size: 32),
+        ),
+      ),
     );
   }
 }
 
-class _BottomNav extends StatelessWidget {
-  const _BottomNav({required this.onAdd});
-  final VoidCallback onAdd;
+// -----------------------------
+// Reused helper widgets (kept from your original file)
+// -----------------------------
+class _HeaderButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _HeaderButton({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
-        border: const Border(top: BorderSide(color: Color.fromRGBO(255, 255, 255, 0.1))),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFB8A6FF).withOpacity(0.2),
-            blurRadius: 10,
-            offset: const Offset(0, -2),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), borderRadius: BorderRadius.circular(12)),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Padding(padding: const EdgeInsets.all(10.0), child: Icon(icon, color: Colors.white, size: 22)),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickActionButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final String? badge;
+  final VoidCallback onTap;
+
+  const _QuickActionButton({required this.label, required this.icon, this.selected = false, this.badge, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? Colors.white : Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Stack(clipBehavior: Clip.none, children: [
+              Icon(icon, color: selected ? const Color(0xff0f766e) : Colors.white, size: 20),
+              if (badge != null)
+                Positioned(
+                  right: -8,
+                  top: -8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(color: Color(0xffef4444), shape: BoxShape.circle),
+                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                    child: Text(badge!, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+                  ),
+                ),
+            ]),
+            const SizedBox(height: 4),
+            Text(label, style: TextStyle(color: selected ? const Color(0xff0f766e) : Colors.white, fontSize: 12, fontWeight: selected ? FontWeight.bold : FontWeight.w500)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactThreadTile extends StatefulWidget {
+  final ThreadItem thread;
+  final VoidCallback onTap;
+
+  const _CompactThreadTile({required this.thread, required this.onTap});
+
+  @override
+  State<_CompactThreadTile> createState() => _CompactThreadTileState();
+}
+
+class _CompactThreadTileState extends State<_CompactThreadTile> {
+  bool _isPressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    // match glowing look: white card with subtle shadow, avatar glow if online
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: AnimatedScale(
+        scale: _isPressed ? 0.98 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        child: Material(
+          color: Colors.white.withOpacity(0.02),
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: widget.onTap,
+            onTapDown: (_) => setState(() => _isPressed = true),
+            onTapUp: (_) => setState(() => _isPressed = false),
+            onTapCancel: () => setState(() => _isPressed = false),
+            child: Container(
+              height: 80,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(children: [
+                Container(
+                  decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
+                    BoxShadow(color: widget.thread.online ? const Color(0xFFBFA2FF).withOpacity(0.9) : const Color(0xFFBFA2FF).withOpacity(0.35), blurRadius: widget.thread.online ? 16 : 6, spreadRadius: widget.thread.online ? 2 : 0)
+                  ]),
+                  padding: const EdgeInsets.all(2),
+                  child: CircleAvatar(radius: 28, backgroundImage: NetworkImage(widget.thread.imageUrl)),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Text(widget.thread.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                    const SizedBox(height: 6),
+                    Text(widget.thread.subtitle, style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 13), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ]),
+                ),
+                Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  Text('now', style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.6))),
+                  const SizedBox(height: 8),
+                  Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: const Color(0xFF0f766e), shape: BoxShape.circle), child: const Text('2', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                ]),
+              ]),
+            ),
           ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: const [
-          _NavButton(label: 'Threads', onTap: _noop),
-          _NavButton(label: 'Moments', onTap: _noop),
-          _AddButton(),
-          _NavButton(label: 'Diary', onTap: _noop),
-          _NavButton(label: 'Calls', onTap: _noop),
-        ],
-      ),
-    );
-  }
-
-  static void _noop() {}
-}
-
-class _AddButton extends StatelessWidget {
-  const _AddButton({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final parent = context.findAncestorWidgetOfExactType<_BottomNav>()!;
-    return SizedBox(
-      width: 50,
-      height: 50,
-      child: ElevatedButton(
-        onPressed: parent.onAdd,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: const Color(0xFFB8A6FF),
-          shape: const CircleBorder(),
-          elevation: 8,
-        ),
-        child: const Text(
-          '+',
-          style: TextStyle(fontSize: 28, fontWeight: FontWeight.w600, color: Color(0xFF0F0F1A)),
         ),
       ),
     );
   }
 }
 
-class _NavButton extends StatelessWidget {
-  const _NavButton({required this.label, required this.onTap, super.key});
+class _PopupMenuItem extends StatelessWidget {
+  final IconData icon;
   final String label;
+  final Color color;
   final VoidCallback onTap;
+
+  const _PopupMenuItem({required this.icon, required this.label, required this.color, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return TextButton(
-      onPressed: onTap,
-      child: Text(label, style: const TextStyle(fontSize: 14, color: Color(0xFFF8F8F8))),
-    );
-  }
-}
-
-class _PopupButton extends StatelessWidget {
-  const _PopupButton({required this.label, required this.onTap});
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return TextButton(
-      onPressed: onTap,
-      style: TextButton.styleFrom(
-        foregroundColor: const Color(0xFFF8F8F8),
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        alignment: Alignment.centerLeft,
+    return Material(
+      color: color.withOpacity(0.08),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(children: [
+            Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: Icon(icon, color: Colors.white, size: 18)),
+            const SizedBox(width: 14),
+            Expanded(child: Text(label, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w600))),
+            Icon(Icons.arrow_forward_ios, size: 14, color: color),
+          ]),
+        ),
       ),
-      child: Text(label, style: const TextStyle(fontSize: 14)),
     );
   }
 }
 
-// --- models (no UI impact) ---
-
+// -----------------------------
+// Models kept as in your original file
+// -----------------------------
 class _ConvLite {
   final String otherUserId;
   final String otherUserName;
@@ -566,7 +734,6 @@ class _ConvLite {
 }
 
 class ThreadItem {
-  // added `id` (the other user's id) for navigation. UI reads only name/subtitle/image/online.
   final String id;
   final String name;
   final String subtitle;

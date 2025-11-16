@@ -1,3 +1,4 @@
+import 'package:chatterly/Contants.dart';
 import 'package:flutter/material.dart';
 import 'dart:math';
 import 'dart:ui';
@@ -23,8 +24,8 @@ class _SignupPageState extends State<SignupPage> {
 
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
-
   final String signupUrl = 'https://chatterly-backend-f9j0.onrender.com/api/auth/signup';
+
 
   Future<void> _signUp() async {
     if (!_formKey.currentState!.validate()) return;
