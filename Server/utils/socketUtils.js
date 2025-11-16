@@ -1,58 +1,107 @@
-// utils/socketUtils.js
+// utils/socket.js
 import jwt from "jsonwebtoken";
-import Message from "../models/Message.js";              // 👈 needed for receipts
-// (Optional) import Conversation if you plan to validate membership
-// import Conversation from "../models/Conversation.js";
+import Message from "../models/Message.js";
+import Conversation from "../models/Conversation.js";
 
 let ioRef = null;
 export const getIO = () => ioRef;
 
+/**
+ * initSocket(io)
+ * - Sets up socket.io event handlers for messaging, delivery/read receipts,
+ *   presence, conversation join/leave, and WebRTC signalling (calls).
+ */
 export const initSocket = (io) => {
   ioRef = io;
 
+  // Track active calls per conversation (conversationId -> call metadata)
+  const activeCalls = new Map();
+
   io.on("connection", async (socket) => {
     try {
-      // Accept token from query or auth
+      // Accept token from auth or query (backwards compatibility)
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
       if (!token) {
-        console.warn("❌ No token provided, disconnecting");
+        console.warn("❌ Token missing — disconnecting socket:", socket.id);
         return socket.disconnect(true);
       }
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.userId = decoded.id;
-      console.log(`✅ Socket connected: ${socket.id} | User: ${socket.userId}`);
 
-      // Presence (optional)
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.userId = decoded.id?.toString?.() ?? decoded.id;
+      console.log(`✅ Socket Connected: ${socket.id} | User: ${socket.userId}`);
+
+      // Join user's personal room for direct signaling (one or more sockets per user)
       socket.join(socket.userId);
+
+      // Broadcast presence to other sockets
       socket.broadcast.emit("user:online", { userId: socket.userId });
 
+      // Track conversations this socket has joined
       socket.joinedConversations = new Set();
 
+      /* ------------------------
+         Conversation join/leave
+      ------------------------- */
       const joinHandler = ({ conversationId, roomId }) => {
-        const convId = (conversationId || roomId || "").toString();
-        if (!convId) return;
-        socket.join(convId);
-        socket.joinedConversations.add(convId);
-        console.log(`🟢 User ${socket.userId} joined conversation ${convId}`);
+        try {
+          const convId = (conversationId || roomId || "").toString();
+          if (!convId) return;
+          socket.join(convId);
+          socket.joinedConversations.add(convId);
+          console.log(`🟢 ${socket.userId} joined conversation ${convId}`);
+        } catch (err) {
+          console.error("joinHandler error:", err?.message || err);
+        }
       };
       const leaveHandler = ({ conversationId, roomId }) => {
-        const convId = (conversationId || roomId || "").toString();
-        if (!convId) return;
-        socket.leave(convId);
-        socket.joinedConversations.delete(convId);
-        console.log(`🔴 User ${socket.userId} left conversation ${convId}`);
+        try {
+          const convId = (conversationId || roomId || "").toString();
+          if (!convId) return;
+          socket.leave(convId);
+          socket.joinedConversations.delete(convId);
+          console.log(`🔴 ${socket.userId} left conversation ${convId}`);
+        } catch (err) {
+          console.error("leaveHandler error:", err?.message || err);
+        }
       };
 
       socket.on("join:conversation", joinHandler);
       socket.on("leave:conversation", leaveHandler);
-      // Back-compat aliases
+      // Backwards-compatible aliases
       socket.on("join", joinHandler);
       socket.on("leave", leaveHandler);
 
-      /* -------------------------------------------------------
-         📬 DELIVERY RECEIPT: flip ✓ → ✓✓ (gray)
-         Client emits: { conversationId, messageId }
-      ------------------------------------------------------- */
+      /* ------------------------
+         CHAT: incoming message send
+         Expects payload compatible with your createMessageAndBroadcast service
+      ------------------------- */
+      socket.on("message:send", async (payload) => {
+        try {
+          const { conversationId } = payload;
+          if (!conversationId) {
+            return socket.emit("message:error", { message: "Missing conversationId" });
+          }
+
+          // Auto-join fallback if socket hasn't joined conversation yet
+          if (!socket.joinedConversations.has(String(conversationId))) {
+            socket.join(conversationId.toString());
+            socket.joinedConversations.add(conversationId.toString());
+          }
+
+          // Lazy import/service separation (keeps file lighter in tests)
+          const { createMessageAndBroadcast } = await import("../services/socketService.js");
+          await createMessageAndBroadcast(ioRef, payload);
+
+          console.log(`📩 Message created and broadcasted for conversation ${conversationId}`);
+        } catch (err) {
+          console.error("❌ message:send error:", err?.message || err);
+          socket.emit("message:error", { message: "Failed to send message" });
+        }
+      });
+
+      /* ------------------------
+         DELIVERY / READ receipts
+      ------------------------- */
       socket.on("message:delivered", async ({ conversationId, messageId }) => {
         try {
           if (!conversationId || !messageId) return;
@@ -61,20 +110,16 @@ export const initSocket = (io) => {
             { $addToSet: { deliveredTo: socket.userId } },
             { new: false }
           );
-          io.to(conversationId.toString()).emit("message:status", {
+          ioRef.to(conversationId.toString()).emit("message:status", {
             _id: messageId,
             messageId,
             status: "delivered",
           });
         } catch (e) {
-          console.error("message:delivered error:", e.message);
+          console.error("message:delivered error:", e?.message || e);
         }
       });
 
-      /* -------------------------------------------------------
-         👁 READ RECEIPT: flip ✓✓ gray → ✓✓ blue
-         Client emits: { conversationId, messageId }
-      ------------------------------------------------------- */
       socket.on("message:read", async ({ conversationId, messageId }) => {
         try {
           if (!conversationId || !messageId) return;
@@ -83,20 +128,16 @@ export const initSocket = (io) => {
             { $addToSet: { readBy: socket.userId } },
             { new: false }
           );
-          io.to(conversationId.toString()).emit("message:status", {
+          ioRef.to(conversationId.toString()).emit("message:status", {
             _id: messageId,
             messageId,
             status: "read",
           });
         } catch (e) {
-          console.error("message:read error:", e.message);
+          console.error("message:read error:", e?.message || e);
         }
       });
 
-      /* -------------------------------------------------------
-         (Optional) Mark all visible as read when opening chat
-         Client emits: { conversationId }
-      ------------------------------------------------------- */
       socket.on("messages:markRead", async ({ conversationId }) => {
         try {
           if (!conversationId) return;
@@ -114,29 +155,207 @@ export const initSocket = (io) => {
           );
 
           ids.forEach((id) => {
-            io.to(conversationId.toString()).emit("message:status", {
+            ioRef.to(conversationId.toString()).emit("message:status", {
               _id: id,
               messageId: id,
               status: "read",
             });
           });
         } catch (e) {
-          console.error("messages:markRead error:", e.message);
+          console.error("messages:markRead error:", e?.message || e);
         }
       });
 
+      /* ============================================================
+         WEBRTC SIGNALING: call-user, answer-call, ice-candidate, end-call, decline
+         Active-calls map prevents races and double-call in same conversation
+         ============================================================ */
+
+      /**
+       * CALL USER
+       * payload: { to, conversationId, offer }
+       * emits to callee: 'incoming-call'
+       */
+      socket.on("call-user", async ({ to, conversationId, offer }) => {
+        try {
+          if (!to || !conversationId || !offer) {
+            return socket.emit("call:error", {
+              message: "Missing to/conversationId/offer",
+            });
+          }
+
+          // Validate conversation & participants
+          const conv = await Conversation.findById(conversationId).select("participants").lean();
+          if (!conv) return socket.emit("call:error", { message: "Conversation not found" });
+
+          const participants = conv.participants.map(String);
+          if (!participants.includes(String(socket.userId))) {
+            return socket.emit("call:error", { message: "You are not a participant in this conversation" });
+          }
+          if (!participants.includes(String(to))) {
+            return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
+          }
+
+          // Check if callee online (user personal room exists)
+          const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
+          if (!calleeOnline) {
+            console.log(`📴 Callee ${to} is offline`);
+            return socket.emit("callee-offline", { to });
+          }
+
+          // Prevent multiple active calls in same conversation
+          if (activeCalls.has(String(conversationId))) {
+            return socket.emit("call:busy", { conversationId });
+          }
+
+          // Mark conversation as active call
+          activeCalls.set(String(conversationId), {
+            callerId: socket.userId,
+            calleeId: to,
+            startedAt: Date.now(),
+          });
+
+          console.log(`📞 ${socket.userId} is calling ${to} (conversation ${conversationId})`);
+
+          ioRef.to(String(to)).emit("incoming-call", {
+            from: socket.userId,
+            conversationId,
+            offer,
+          });
+        } catch (err) {
+          console.error("❌ call-user error:", err?.message || err);
+          socket.emit("call:error", { message: "Failed to make call" });
+        }
+      });
+
+      /**
+       * ANSWER CALL
+       * payload: { to, conversationId, answer }
+       * emits to caller: 'call-answered'
+       */
+      socket.on("answer-call", ({ to, conversationId, answer }) => {
+        try {
+          ioRef.to(String(to)).emit("call-answered", {
+            from: socket.userId,
+            conversationId,
+            answer,
+          });
+
+          const call = activeCalls.get(String(conversationId));
+          if (call) {
+            activeCalls.set(String(conversationId), {
+              ...call,
+              establishedAt: Date.now(),
+            });
+          }
+        } catch (err) {
+          console.error("❌ answer-call error:", err?.message || err);
+        }
+      });
+
+      /**
+       * ICE CANDIDATES
+       * payload: { to, conversationId, candidate }
+       */
+      socket.on("ice-candidate", ({ to, conversationId, candidate }) => {
+        try {
+          ioRef.to(String(to)).emit("ice-candidate", {
+            from: socket.userId,
+            conversationId,
+            candidate,
+          });
+        } catch (err) {
+          console.error("❌ ice-candidate error:", err?.message || err);
+        }
+      });
+
+      /**
+       * END CALL
+       * payload: { to, conversationId, reason? }
+       */
+      socket.on("end-call", ({ to, conversationId, reason }) => {
+        try {
+          ioRef.to(String(to)).emit("call-ended", {
+            from: socket.userId,
+            conversationId,
+            reason: reason || null,
+          });
+
+          if (conversationId && activeCalls.has(String(conversationId))) {
+            activeCalls.delete(String(conversationId));
+          }
+        } catch (err) {
+          console.error("❌ end-call error:", err?.message || err);
+        }
+      });
+
+      /**
+       * DECLINE CALL
+       * payload: { to, conversationId, reason? }
+       */
+      socket.on("call-decline", ({ to, conversationId, reason }) => {
+        try {
+          ioRef.to(String(to)).emit("call-declined", {
+            from: socket.userId,
+            conversationId,
+            reason: reason || null,
+          });
+
+          if (conversationId && activeCalls.has(String(conversationId))) {
+            activeCalls.delete(String(conversationId));
+          }
+        } catch (err) {
+          console.error("❌ call-decline error:", err?.message || err);
+        }
+      });
+
+      /* ------------------------
+         DISCONNECT: cleanup and notify other participant if in active call
+      ------------------------- */
       socket.on("disconnect", () => {
-        console.log(`❌ Socket disconnected: ${socket.id} | User: ${socket.userId}`);
-        socket.broadcast.emit("user:offline", { userId: socket.userId });
+        try {
+          console.log(`❌ Socket disconnected: ${socket.id} | User: ${socket.userId}`);
+          socket.broadcast.emit("user:offline", { userId: socket.userId });
+
+          // Cleanup any active calls involving this user
+          for (const [convId, call] of activeCalls.entries()) {
+            if (String(call.callerId) === String(socket.userId) || String(call.calleeId) === String(socket.userId)) {
+              activeCalls.delete(convId);
+
+              const other =
+                String(call.callerId) === String(socket.userId) ? call.calleeId : call.callerId;
+
+              ioRef.to(String(other)).emit("call-ended", {
+                from: socket.userId,
+                conversationId: convId,
+                reason: "peer-disconnected",
+              });
+            }
+          }
+        } catch (err) {
+          console.error("disconnect handler error:", err?.message || err);
+        }
       });
     } catch (err) {
-      console.error("Socket auth error:", err.message);
-      socket.disconnect(true);
+      console.error("❌ Socket authentication/connection error:", err?.message || err);
+      try {
+        socket.disconnect(true);
+      } catch (e) {
+        // ignore
+      }
     }
   });
 };
 
+/**
+ * Helper: emitMessageToRoom
+ * Use this from other modules to broadcast a message to a conversation room
+ */
 export function emitMessageToRoom(conversationId, payload) {
   if (!ioRef || !conversationId) return;
-  ioRef.to(conversationId.toString()).emit("message:new", payload);
+  try {
+    ioRef.to(conversationId.toString()).emit("message:new", payload);
+  } catch (err) {
+    console.error("emitMessageToRoom error:", err?.message || err);
+  }
 }
