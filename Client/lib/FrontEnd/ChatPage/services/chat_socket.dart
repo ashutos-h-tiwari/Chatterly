@@ -9,6 +9,8 @@ class ChatSocket {
   final String token;
 
   IO.Socket? _socket;
+
+  bool get isConnected => _socket?.connected ?? false;
   // ADD these helpers at top-level in the file
   bool _payloadSaysTypingOn(dynamic data) {
     // accepts: {isTyping:true} OR {typing:true} OR "start"/"stop"
@@ -57,10 +59,10 @@ class ChatSocket {
         _socket!.emit('messages:markRead', {'conversationId': roomId});
       }
     }
-    _socket!.onConnect((_) {
-      if (roomId != null) _socket!.emit('join:conversation', {'conversationId': roomId});
-      if (roomId != null) _socket!.emit('messages:markRead', {'conversationId': roomId});
-    });
+    // _socket!.onConnect((_) {
+    //   if (roomId != null) _socket!.emit('join:conversation', {'conversationId': roomId});
+    //   if (roomId != null) _socket!.emit('messages:markRead', {'conversationId': roomId});
+    // });
     _socket!.onConnect((_) => join());
     _socket!.on('reconnect', (_) => join());
 
@@ -141,4 +143,10 @@ class ChatSocket {
   void dispose() {
     _socket?.dispose();
   }
+//changes
+  void rejoin(String roomId) {
+    _socket?.emit('join:conversation', {'conversationId': roomId});
+    _socket?.emit('messages:markRead', {'conversationId': roomId});
+  }
+
 }

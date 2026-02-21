@@ -50,6 +50,12 @@ dependencies:
   flutter_sound:
   just_audio:
   device_info_plus:
+  flutter_webrtc:
+  uuid:
+
+
+  #  agora_rtc_engine:
+
 
 
   # The following adds the Cupertino Icons font to your application.

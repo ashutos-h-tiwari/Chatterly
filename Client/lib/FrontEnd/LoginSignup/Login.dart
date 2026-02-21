@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'Signup.dart';
 import '../HomePage/HomePage.dart';
+import 'package:flutter/foundation.dart'; // <--- ADJUSTMENT: Added for kDebugMode
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -21,7 +22,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   final _nameController = TextEditingController();
   final _passwordController = TextEditingController();
 
-  // Login endpoint
   static const String kLoginUrl = 'https://chatterly-backend-f9j0.onrender.com/api/auth/login';
 
   bool _showPortal = true;
@@ -39,6 +39,15 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   @override
   void initState() {
     super.initState();
+
+    // --- ADJUSTMENT START: Auto-Login Logic ---
+    // This waits for the first frame to render before triggering login
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (kDebugMode) {
+        _debugAutoLogin();
+      }
+    });
+    // --- ADJUSTMENT END ---
 
     _introController = AnimationController(vsync: this, duration: const Duration(seconds: 1));
     _sutraScale = Tween<double>(begin: 0.95, end: 1.0).animate(
@@ -65,6 +74,13 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     });
   }
 
+  // --- ADJUSTMENT: Helper method for auto-login ---
+  void _debugAutoLogin() {
+    _nameController.text = "ashutosh@gmail.com";
+    _passwordController.text = "ashutosh123";
+    _threadIn(); // Triggers your existing login function
+  }
+
   @override
   void dispose() {
     _nameController.dispose();
@@ -73,15 +89,12 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     super.dispose();
   }
 
-  // --- NEW: decode JWT to extract userId (sub/id/userId) ---
   String? _extractUserIdFromJwt(String jwt) {
     try {
       final parts = jwt.split('.');
       if (parts.length != 3) return null;
-
       final payload = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
       final map = jsonDecode(payload) as Map<String, dynamic>;
-
       final id = map['sub'] ?? map['id'] ?? map['userId'];
       return id?.toString();
     } catch (_) {
@@ -104,7 +117,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
     try {
       final uri = Uri.parse(kLoginUrl);
-
       final resp = await http
           .post(
         uri,
@@ -129,7 +141,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString("token", token);
 
-          // NEW: derive & store my userId for rooms/messages etc.
           final myId = _extractUserIdFromJwt(token);
           if (myId != null && myId.isNotEmpty) {
             await prefs.setString("userId", myId);
@@ -137,7 +148,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
           if (!mounted) return;
           setState(() {
-            _welcomeName = email; // you can replace with /me later
+            _welcomeName = email;
             _showPortal = false;
             _showIntro = true;
           });
@@ -164,6 +175,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
   @override
   Widget build(BuildContext context) {
+    // ... rest of your build method remains the same ...
     final mutedColor = const Color(0xFFEAF2FF);
     final goldStrong = const Color(0xFFFFCC4D);
     final bgDeep1 = const Color(0xFF070416);
@@ -177,8 +189,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       body: Stack(
         children: [
           const Positioned.fill(child: StarryBackground()),
-
-          // Outer glow portal ring
           Positioned.fill(
             child: Center(
               child: Container(
@@ -205,8 +215,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
               ),
             ),
           ),
-
-          // Portal Login Form
           if (_showPortal)
             Center(
               child: ClipRRect(
@@ -265,8 +273,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                     ),
                                   ),
                                   const SizedBox(height: 20),
-
-                                  // Email field (API expects email)
                                   TextField(
                                     controller: _nameController,
                                     style: TextStyle(color: mutedColor),
@@ -287,8 +293,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                     ),
                                   ),
                                   const SizedBox(height: 8),
-
-                                  // Password field
                                   TextField(
                                     controller: _passwordController,
                                     obscureText: _obscure,
@@ -314,8 +318,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                     ),
                                   ),
                                   const SizedBox(height: 12),
-
-                                  // Login button
                                   SizedBox(
                                     width: portalDiameter * 0.7,
                                     height: 42,
@@ -359,8 +361,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                 ),
               ),
             ),
-
-          // Intro Animation (SUTRA)
           if (_showIntro)
             Center(
               child: FadeTransition(
@@ -395,8 +395,6 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                 ),
               ),
             ),
-
-          // Signup button
           if (_showPortal)
             Align(
               alignment: Alignment.bottomCenter,
@@ -425,6 +423,8 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     );
   }
 }
+
+// ... StarryBackground and other classes remain the same ...
 
 // STAR BACKGROUND (unchanged)
 class StarryBackground extends StatefulWidget {

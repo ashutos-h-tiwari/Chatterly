@@ -99,6 +99,36 @@
       <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/url_launcher_windows/example/.dart_tool" />
       <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/url_launcher_windows/example/.pub" />
       <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/url_launcher_windows/example/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/device_info_plus/example/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/example/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/example/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/permission_handler_windows/example/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/build" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/.dart_tool" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/.pub" />
+      <excludeFolder url="file://$MODULE_DIR$/Client/windows/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/example/build" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

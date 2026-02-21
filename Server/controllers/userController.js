@@ -23,6 +23,27 @@ export const updateAvatar = async (req, res) => {
     res.status(500).json({ error: "Avatar upload failed" });
   }
 };
+// ✅ Update bio
+export const updateBio = async (req, res) => {
+  try {
+    const { bio } = req.body;
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { bio },
+      { new: true }
+    ).select("-password");
+
+    res.status(200).json({
+      message: "Bio updated successfully",
+      user,
+    });
+
+  } catch (err) {
+    console.error("❌ Error updating bio:", err.message);
+    res.status(500).json({ error: "Bio update failed" });
+  }
+};
 
 // ✅ Get all users except current
 export const getUsers = async (req, res) => {

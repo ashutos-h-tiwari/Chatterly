@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../ChatPage/ChatPage.dart';
 import '../Status page/status.dart';
+import '../profile/connectionProfile.dart';
 import '../profile/profile.dart';
 import '../profile/profileupdate.dart';
 // import ''; // <-- UPDATE this import to your actual path
@@ -110,7 +111,6 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
       if (mounted) setState(() => _loading = false);
     }
   }
-
   Future<void> _loadConversations() async {
     setState(() {
       _loading = true;
@@ -140,15 +140,25 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
           throw const FormatException('Unexpected conversations payload');
         }
 
+        // 🔥 Get SharedPreferences instance once
+        final prefs = await SharedPreferences.getInstance();
+
         final mapped = <ThreadItem>[];
+
         for (final raw in list) {
           final conv = _parseConversation(raw);
           if (conv == null) continue;
 
           final img = _avatarFor(conv.otherUserName);
+
+          // 🔥 Check if custom nickname exists
+          final customName =
+              prefs.getString('nick_${conv.otherUserId}') ??
+                  conv.otherUserName;
+
           mapped.add(
             ThreadItem(
-              conv.otherUserName,
+              customName, // 🔥 show nickname if exists
               conv.lastText ?? 'Say hi 👋',
               img,
               true,
@@ -176,6 +186,71 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
       if (mounted) setState(() => _loading = false);
     }
   }
+  // Future<void> _loadConversations() async {
+  //   setState(() {
+  //     _loading = true;
+  //     _error = null;
+  //   });
+  //
+  //   try {
+  //     final res = await http.get(
+  //       Uri.parse(kListConversations),
+  //       headers: {
+  //         'Authorization': 'Bearer $_token',
+  //         'Accept': 'application/json',
+  //       },
+  //     );
+  //
+  //     if (res.statusCode >= 200 && res.statusCode < 300) {
+  //       final body = jsonDecode(res.body);
+  //
+  //       List list = [];
+  //       if (body is List) {
+  //         list = body;
+  //       } else if (body is Map && body['conversations'] is List) {
+  //         list = body['conversations'];
+  //       } else if (body is Map && body['data'] is List) {
+  //         list = body['data'];
+  //       } else {
+  //         throw const FormatException('Unexpected conversations payload');
+  //       }
+  //
+  //       final mapped = <ThreadItem>[];
+  //       for (final raw in list) {
+  //         final conv = _parseConversation(raw);
+  //         if (conv == null) continue;
+  //
+  //         final img = _avatarFor(conv.otherUserName);
+  //         mapped.add(
+  //           ThreadItem(
+  //             conv.otherUserName,
+  //             conv.lastText ?? 'Say hi 👋',
+  //             img,
+  //             true,
+  //             id: conv.otherUserId,
+  //           ),
+  //         );
+  //       }
+  //
+  //       setState(() {
+  //         threads
+  //           ..clear()
+  //           ..addAll(mapped);
+  //       });
+  //     } else {
+  //       String msg = 'Server error: ${res.statusCode}';
+  //       try {
+  //         final err = jsonDecode(res.body);
+  //         msg = err['message']?.toString() ?? msg;
+  //       } catch (_) {}
+  //       setState(() => _error = msg);
+  //     }
+  //   } catch (e) {
+  //     setState(() => _error = 'Network error: $e');
+  //   } finally {
+  //     if (mounted) setState(() => _loading = false);
+  //   }
+  // }
 
   _ConvLite? _parseConversation(dynamic json) {
     if (json is! Map) return null;
@@ -659,12 +734,48 @@ class _CompactThreadTileState extends State<_CompactThreadTile> {
               height: 80,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(children: [
-                Container(
-                  decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
-                    BoxShadow(color: widget.thread.online ? const Color(0xFFBFA2FF).withOpacity(0.9) : const Color(0xFFBFA2FF).withOpacity(0.35), blurRadius: widget.thread.online ? 16 : 6, spreadRadius: widget.thread.online ? 2 : 0)
-                  ]),
-                  padding: const EdgeInsets.all(2),
-                  child: CircleAvatar(radius: 28, backgroundImage: NetworkImage(widget.thread.imageUrl)),
+                // Container(
+                //   decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
+                //     BoxShadow(color: widget.thread.online ? const Color(0xFFBFA2FF).withOpacity(0.9) : const Color(0xFFBFA2FF).withOpacity(0.35), blurRadius: widget.thread.online ? 16 : 6, spreadRadius: widget.thread.online ? 2 : 0)
+                //   ]),
+                //   padding: const EdgeInsets.all(2),
+                //   child: CircleAvatar(radius: 28, backgroundImage: NetworkImage(widget.thread.imageUrl)),
+                // ),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ConnectionProfilePage(
+                          userId: widget.thread.id,
+                          name: widget.thread.name,
+                          email: "user@email.com", // 🔥 replace with real data if available
+                          phone: "9876543210",     // 🔥 replace with real data if available
+                          bio: "User bio here",    // 🔥 replace with real data if available
+                          imageUrl: widget.thread.imageUrl,
+                        ),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: widget.thread.online
+                              ? const Color(0xFFBFA2FF).withOpacity(0.9)
+                              : const Color(0xFFBFA2FF).withOpacity(0.35),
+                          blurRadius: widget.thread.online ? 16 : 6,
+                          spreadRadius: widget.thread.online ? 2 : 0,
+                        )
+                      ],
+                    ),
+                    padding: const EdgeInsets.all(2),
+                    child: CircleAvatar(
+                      radius: 28,
+                      backgroundImage: NetworkImage(widget.thread.imageUrl),
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(

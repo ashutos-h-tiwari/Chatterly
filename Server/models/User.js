@@ -7,6 +7,7 @@ const userSchema = new mongoose.Schema({
   avatar: { type: String },         // URL or uploaded filename
   socketId: { type: String, default: null }, // current socket id for presence
   isOnline: { type: Boolean, default: false }
+  bio: { type: String, default: "" }
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

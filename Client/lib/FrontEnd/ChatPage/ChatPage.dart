@@ -1,29 +1,40 @@
-// lib/FrontEnd/ChatPage/ChatPage.dart
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:dio/dio.dart' as dio;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:flutter_sound/flutter_sound.dart';
-import 'package:just_audio/just_audio.dart' as ja;
+
+// local imports (adjust paths if your folder structure differs)
+import 'package:chatterly/FrontEnd/ChatPage/Call/call_socket.dart';
+import 'services/chat_api.dart';
+import 'package:chatterly/FrontEnd/ChatPage/services/chat_socket.dart';
 
 import 'models/chat_message.dart';
 import 'models/message_status.dart';
 import 'models/reply_ref.dart';
-import 'services/chat_api.dart';
-import 'services/chat_socket.dart';
+
 import 'utils/json_utils.dart';
 import 'utils/mime_utils.dart';
 import 'utils/time_utils.dart';
+import 'utils/media_saver.dart';
+import 'utils/files_utils.dart';
+
+import 'services/recorder_services.dart';
+import 'services/audio_services.dart';
+
 import 'widgets/message_bubble.dart';
 import 'widgets/typing_dots.dart';
 import 'widgets/reply_banner.dart';
+import 'widgets/message_list.dart';
+
+import 'viewer/fullscreen_viewer.dart';
+import 'package:chatterly/FrontEnd/ChatPage/Call/call_screen.dart';
 
 class ChatPage extends StatefulWidget {
   final String chatUserId;
@@ -39,7 +50,6 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-// NOTE: added TickerProviderStateMixin for animations
 class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, TickerProviderStateMixin {
   static const String _base = 'https://chatterly-backend-f9j0.onrender.com';
 
@@ -50,6 +60,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   late ChatApi _api;
   late ChatSocket _socketSvc;
+  late CallSocket _callSocket; // call signalling socket
 
   String? _token;
   String? _myUserId;
@@ -77,33 +88,32 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   // reply
   ChatMessage? _replyTo;
 
-  // emoji picker toggle (kept but not implemented visual picker)
   bool _showEmojiPicker = false;
 
-  // animation controllers used by header & input area
   late AnimationController _headerController;
   late AnimationController _inputController;
 
-  // cache key
   String get _cacheKey => 'chat_cache_${_roomId ?? 'unknown'}';
-
   String _avatarUrl = '';
 
-  // --- Recording & playback
-  final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
-  bool _recorderInitialized = false;
-  bool _isRecording = false;
-  String? _currentRecordingTempPath; // temp path produced by recorder
-  final ja.AudioPlayer _audioPlayer = ja.AudioPlayer();
-  String? _playingMessageId;
+  // recorder & audio services
+  final RecorderService _recorder = RecorderService();
+  final AudioService _audioService = AudioService();
 
-  // Playback streams
+  bool _recorderReady = false;
+  bool _isRecording = false;
+
+  // audio playback state
+  String? _playingMessageId;
   Duration _audioDuration = Duration.zero;
   Duration _audioPosition = Duration.zero;
 
   StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<Duration>? _positionSub;
-  StreamSubscription<ja.PlayerState>? _playerStateSub; // <-- use just_audio PlayerState via alias 'ja'
+  StreamSubscription<PlayerState>? _playerStateSub;
+
+  // Call UI state
+  bool _incomingDialogVisible = false;
 
   @override
   void initState() {
@@ -124,41 +134,30 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     )..forward();
 
     _avatarUrl = _getAvatarUrl(widget.chatUserName);
-    _initRecorder();
-    _setupAudioListeners();
+
+    // init recorder/audio first (they don't block UI)
+    _initRecorderAndAudio();
+
+    // bootstrap chat (auth, load messages, connect socket)
     _bootstrap();
   }
 
-  Future<void> _initRecorder() async {
+  Future<void> _initRecorderAndAudio() async {
     try {
-      await _recorder.openRecorder();
-      _recorderInitialized = true;
-    } catch (e) {
-      debugPrint('Recorder init failed: $e');
-      _recorderInitialized = false;
-    }
-    setState(() {});
-  }
-
-  void _setupAudioListeners() {
-    // listen to duration changes
-    _durationSub = _audioPlayer.durationStream.listen((d) {
-      if (mounted) setState(() => _audioDuration = d ?? Duration.zero);
-    });
-
-    // listen to position updates
-    _positionSub = _audioPlayer.positionStream.listen((p) {
-      if (mounted) setState(() => _audioPosition = p);
-    });
-
-    // listen to completion / state changes (use ja.PlayerState and ja.ProcessingState)
-    _playerStateSub = _audioPlayer.playerStateStream.listen((ja.PlayerState state) {
-      if (state.processingState == ja.ProcessingState.completed) {
-        _playingMessageId = null;
-        _audioPosition = Duration.zero;
-        if (mounted) setState(() {});
+      // CHECK PERMISSIONS BEFORE INIT
+      final status = await Permission.microphone.status;
+      if (status.isGranted) {
+        await _recorder.init();
+        _recorderReady = _recorder.isInitialized;
+      } else {
+        print("⚠️ Recorder skipped: Mic permission not granted yet.");
       }
-    });
+    } catch (e) {
+      debugPrint('Recorder init error: $e'); // Catch the crash here
+      _recorderReady = false;
+    }
+
+    // ... rest of audio service init ...
   }
 
   @override
@@ -174,6 +173,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _socketSvc.dispose();
     } catch (_) {}
 
+    try {
+      _callSocket.dispose();
+    } catch (_) {}
+
     _composer.dispose();
     _scroll.dispose();
     _composerFocus.dispose();
@@ -181,26 +184,39 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     _typingSendStopTimer?.cancel();
     _headerController.dispose();
     _inputController.dispose();
+
     try {
-      _recorder.closeRecorder();
+      _recorder.dispose();
     } catch (_) {}
 
-    // cancel audio stream subs
-    try { _durationSub?.cancel(); } catch (_) {}
-    try { _positionSub?.cancel(); } catch (_) {}
-    try { _playerStateSub?.cancel(); } catch (_) {}
+    try {
+      _durationSub?.cancel();
+    } catch (_) {}
+    try {
+      _positionSub?.cancel();
+    } catch (_) {}
+    try {
+      _playerStateSub?.cancel();
+    } catch (_) {}
 
-    _audioPlayer.dispose();
+    try {
+      _audioService.dispose();
+    } catch (_) {}
 
     super.dispose();
   }
 
   @override
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _roomId != null) {
-      _socketSvc.markAllRead(_roomId);
+      try {
+        _socketSvc.rejoin(_roomId!);   // ✅ force unwrap
+        _socketSvc.markAllRead(_roomId);
+      } catch (_) {}
     }
   }
+
 
   void _onFocusChanged() {
     setState(() {});
@@ -233,6 +249,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _api = ChatApi(_token!);
       _socketSvc = ChatSocket(baseUrl: _base, token: _token!);
 
+      // init call socket
+      _callSocket = CallSocket(serverUrl: _base, token: _token!);
+
+      // IMPORTANT: connect call socket with userId so server joins personal room
+      _callSocket.connect(userId: _myUserId!);
+      _registerCallSocketHandlers();
+
       final conv = await _api.createOrGetConversation(widget.chatUserId);
       _roomId = (conv['_id'] ?? conv['id'] ?? conv['roomId'] ?? conv['conversationId'])?.toString();
       if (_roomId == null || _roomId!.isEmpty) {
@@ -240,73 +263,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         if (mounted) Navigator.of(context).pop();
         return;
       }
-
-      await _loadCached();
-
-      await _loadMessages();
       _connectSocket();
+      await _loadCached();
+      await _loadMessages();
+
     } catch (e) {
+      debugPrint('Bootstrap failed: $e');
       _snack('Setup failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
-
-  Future<void> _loadCached() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_cacheKey);
-    if (raw == null) return;
-    try {
-      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-      final msgs = list.map((m) => ChatMessage.fromCache(m)).toList();
-      if (!mounted) return;
-      setState(() {
-        _messages..clear()..addAll(msgs);
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _persistCache() async {
-    final prefs = await SharedPreferences.getInstance();
-    final enc = jsonEncode(_messages.map((m) => m.toCache()).toList());
-    await prefs.setString(_cacheKey, enc);
-  }
-
-  Future<void> _loadMessages({String? before}) async {
-    if (_roomId == null) return;
-    if (_loadingMore) return;
-    final msgs = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
-    setState(() {
-      if (before == null) {
-        _messages..clear()..addAll(msgs);
-      } else {
-        _messages.insertAll(0, msgs);
-      }
-      _hasMore = msgs.isNotEmpty;
-      _olderCursor = _messages.isNotEmpty ? _messages.first.id : null;
-    });
-    _persistCache();
-  }
-
-  Future<void> _loadMore() async {
-    if (!_hasMore || _loadingMore || _roomId == null || _messages.isEmpty) return;
-    setState(() => _loadingMore = true);
-    try {
-      await _loadMessages(before: _olderCursor);
-    } finally {
-      if (mounted) setState(() => _loadingMore = false);
-    }
-  }
-
-  void _onScroll() {
-    if (!_scroll.hasClients) return;
-    if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 100) {
-      _loadMore();
-    }
-  }
-
-  // ================== Socket ==================
+  // ================== Socket (chat) ==================
   void _connectSocket() {
+    if (_socketSvc.isConnected) return; // 👈 guard
+
     _socketSvc.connect(
       roomId: _roomId,
       onIncoming: (data) {
@@ -371,8 +342,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
           _persistCache();
         }
       },
-
-      // ------- TYPING (filtered by room & not self) -------
       onTypingStart: (data) {
         final m = (data is Map) ? data : {};
         final cid = (m['conversationId'] ?? m['roomId'] ?? m['cid'])?.toString();
@@ -397,6 +366,60 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       },
     );
   }
+  Future<void> _loadCached() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cacheKey);
+    if (raw == null) return;
+    try {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      final msgs = list.map((m) => ChatMessage.fromCache(m)).toList();
+      if (!mounted) return;
+      setState(() {
+        _messages..clear()..addAll(msgs);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _persistCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enc = jsonEncode(_messages.map((m) => m.toCache()).toList());
+    await prefs.setString(_cacheKey, enc);
+  }
+
+  Future<void> _loadMessages({String? before}) async {
+    if (_roomId == null) return;
+    if (_loadingMore) return;
+    final msgs = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
+    setState(() {
+      if (before == null) {
+        _messages..clear()..addAll(msgs);
+      } else {
+        _messages.insertAll(0, msgs);
+      }
+      _hasMore = msgs.isNotEmpty;
+      _olderCursor = _messages.isNotEmpty ? _messages.first.id : null;
+    });
+    _persistCache();
+  }
+
+  Future<void> _loadMore() async {
+    if (!_hasMore || _loadingMore || _roomId == null || _messages.isEmpty) return;
+    setState(() => _loadingMore = true);
+    try {
+      await _loadMessages(before: _olderCursor);
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 100) {
+      _loadMore();
+    }
+  }
+
+
 
   MessageStatus _parseStatus(String s) {
     switch (s) {
@@ -458,7 +481,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     _scrollToBottom();
     _persistCache();
 
-    // ensure peer typing hides when you send
     _socketSvc.emitTypingStop(_roomId);
 
     try {
@@ -481,6 +503,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         _persistCache();
       }
     } catch (e) {
+      debugPrint('Send failed: $e');
       _snack('Send failed');
     }
   }
@@ -540,142 +563,96 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         _persistCache();
       }
     } catch (e) {
+      debugPrint('Upload failed: $e');
       _snack('Upload failed');
     } finally {
       setState(() => _replyTo = null);
     }
   }
 
-  // ================== Recording flow ==================
-  Future<String> _appDocumentsPath() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return dir.path;
-  }
-
+  // ================== Recording ==================
   String _generateFileName(String ext) {
     final millis = DateTime.now().millisecondsSinceEpoch;
     return 'voice_$millis.$ext';
   }
 
   Future<void> _startRecording() async {
-    if (!_recorderInitialized) {
-      _snack('Recorder not initialized');
+    if (!_recorderReady) {
+      _snack('Recorder not ready');
       return;
     }
-
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) {
-      _snack('Microphone permission is required to record audio.');
+    final ok = await _recorder.startRecording();
+    if (!ok) {
+      _snack('Microphone permission denied or recorder failed');
       return;
     }
-
-    try {
-      final tmpDir = await getTemporaryDirectory();
-      final tmpPath = '${tmpDir.path}/${_generateFileName('aac')}';
-      _currentRecordingTempPath = tmpPath;
-
-      await _recorder.startRecorder(
-        toFile: tmpPath,
-        codec: Codec.aacADTS,
-        bitRate: 128000,
-        sampleRate: 44100,
-      );
-
-      setState(() => _isRecording = true);
-    } catch (e) {
-      debugPrint('Start recording error: $e');
-      _snack('Could not start recording');
-    }
+    setState(() => _isRecording = true);
   }
 
   Future<void> _stopRecordingAndSend() async {
-    if (!_recorderInitialized || !_isRecording) return;
+    if (!_recorder.isRecording) return;
+    final newPath = await _recorder.stopRecordingAndMoveToAppDir();
+    setState(() => _isRecording = false);
+    if (newPath == null) {
+      _snack('Recording failed');
+      return;
+    }
+
+    final tempId = UniqueKey().toString();
+    final mime = 'audio/aac';
+    setState(() {
+      _messages.add(ChatMessage(
+        id: tempId,
+        text: '🎤 Voice message',
+        isSentByMe: true,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sending,
+        uploadProgress: 0.0,
+        attachmentUrl: newPath,
+        attachmentType: mime,
+      ));
+    });
+    _scrollToBottom();
+    _persistCache();
 
     try {
-      final recordedPath = await _recorder.stopRecorder();
-      setState(() => _isRecording = false);
-
-      if (recordedPath == null) return;
-
-      // move to app documents (persistent)
-      final ext = recordedPath.split('.').last;
-      final newName = _generateFileName(ext);
-      final appPath = await _appDocumentsPath();
-      final newPath = '$appPath/$newName';
-      final recordedFile = File(recordedPath);
-      await recordedFile.copy(newPath);
-
-      // create a pending ChatMessage for the voice note
-      final tempId = UniqueKey().toString();
-      final displayName = '🎤 Voice message';
-      final mime = 'audio/aac';
-      setState(() {
-        _messages.add(ChatMessage(
-          id: tempId,
-          text: displayName,
-          isSentByMe: true,
-          timestamp: DateTime.now(),
-          status: MessageStatus.sending,
-          uploadProgress: 0.0,
-          attachmentUrl: newPath, // local path while uploading
-          attachmentType: mime,
-        ));
-      });
-      _scrollToBottom();
-      _persistCache();
-
-      // Upload using existing API (sendAttachment) - prefer filePath-based upload
-      try {
-        final saved = await _api.sendAttachment(
-          _roomId!,
-          dioClient: _dio,
-          clientId: tempId,
-          fileName: newName,
-          mime: mime,
-          bytes: null, // let API use filePath
-          filePath: newPath,
-          replyTo: _replyTo?.id,
-          myUserId: _myUserId,
-          onProgress: (sent, total) {
-            if (total > 0) {
-              final p = sent / total;
-              final i = _messages.indexWhere((m) => m.id == tempId);
-              if (i != -1 && mounted) {
-                setState(() => _messages[i] = _messages[i].copyWith(uploadProgress: p));
-              }
+      final saved = await _api.sendAttachment(
+        _roomId!,
+        dioClient: _dio,
+        clientId: tempId,
+        fileName: newPath.split('/').last,
+        mime: mime,
+        bytes: null,
+        filePath: newPath,
+        replyTo: _replyTo?.id,
+        myUserId: _myUserId,
+        onProgress: (sent, total) {
+          if (total > 0) {
+            final p = sent / total;
+            final i = _messages.indexWhere((m) => m.id == tempId);
+            if (i != -1 && mounted) {
+              setState(() => _messages[i] = _messages[i].copyWith(uploadProgress: p));
             }
-          },
-        );
+          }
+        },
+      );
 
-        final i = _messages.indexWhere((m) => m.id == tempId);
-        if (i != -1 && mounted) {
-          setState(() => _messages[i] = saved.copyWith(status: MessageStatus.sent, uploadProgress: 1.0));
-          _persistCache();
-        }
-      } catch (e) {
-        debugPrint('Voice upload error: $e');
-        _snack('Voice upload failed');
-        // keep local file and mark as sending/failure per your UX choice
-      } finally {
-        setState(() => _replyTo = null);
+      final i = _messages.indexWhere((m) => m.id == tempId);
+      if (i != -1 && mounted) {
+        setState(() => _messages[i] = saved.copyWith(status: MessageStatus.sent, uploadProgress: 1.0));
+        _persistCache();
       }
     } catch (e) {
-      debugPrint('Stop recording error: $e');
-      setState(() => _isRecording = false);
-      _snack('Recording failed');
+      debugPrint('Voice upload failed: $e');
+      _snack('Voice upload failed');
+    } finally {
+      setState(() => _replyTo = null);
     }
   }
 
   Future<void> _cancelRecording() async {
-    try {
-      if (_recorder.isRecording) {
-        await _recorder.stopRecorder();
-      }
-    } catch (_) {}
-    setState(() {
-      _isRecording = false;
-      _currentRecordingTempPath = null;
-    });
+    await _recorder.cancelRecording();
+    setState(() => _isRecording = false);
   }
 
   // ================== Playback ==================
@@ -695,7 +672,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     return false;
   }
 
-  // NEW: detect image message
   bool _isImageMessage(ChatMessage m) {
     final url = (m.attachmentUrl ?? '').toLowerCase();
     if (url.isEmpty) return false;
@@ -709,98 +685,38 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   Future<void> _playOrPauseAudioForMessage(ChatMessage m) async {
     try {
-      // if same message currently playing -> toggle pause
-      if (_playingMessageId == m.id && _audioPlayer.playing) {
-        await _audioPlayer.pause();
+      if (_playingMessageId == m.id && _audioService.playing) {
+        await _audioService.pause();
         if (mounted) setState(() {});
         return;
       }
 
-      // if different message playing -> stop previous
       if (_playingMessageId != null && _playingMessageId != m.id) {
         try {
-          await _audioPlayer.stop();
+          await _audioService.stop();
         } catch (_) {}
         _playingMessageId = null;
         _audioPosition = Duration.zero;
       }
 
-      String source = m.attachmentUrl ?? '';
-
+      final source = m.attachmentUrl ?? '';
       if (source.isEmpty) {
         _snack('No audio source');
         return;
       }
 
-      if (source.startsWith('http')) {
-        await _audioPlayer.setUrl(source);
-      } else {
-        await _audioPlayer.setFilePath(source);
-      }
-
+      await _audioService.setSource(source);
       _playingMessageId = m.id;
-      await _audioPlayer.play();
+      await _audioService.play();
 
-      // playerStateStream already listened in _setupAudioListeners, don't add duplicate listeners here.
-
-      if (mounted) setState(() {});
+      setState(() {});
     } catch (e) {
       debugPrint('Playback error: $e');
       _snack('Cannot play audio');
     }
   }
 
-  // NEW: open fullscreen image viewer
-  void _openImageViewer(ChatMessage m) {
-    final src = m.attachmentUrl ?? '';
-    if (src.isEmpty) {
-      _snack('No image to show');
-      return;
-    }
-
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => FullScreenImagePage(
-          tag: 'image_${m.id}',
-          imageSource: src,
-          isNetwork: src.startsWith('http') || src.startsWith('https'),
-        ),
-      ),
-    );
-  }
-
   // ================== Save / Download attachments ==================
-  // Helper: derive filename from URL or path
-  String _deriveFileName(String raw) {
-    try {
-      final uri = Uri.parse(raw);
-      final name = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : '';
-      if (name.isNotEmpty) return name;
-    } catch (_) {}
-    return 'file_${DateTime.now().millisecondsSinceEpoch}';
-  }
-
-  // Helper: get public folder path for given mime
-  String _publicFolderForMime(String mime) {
-    if (mime.startsWith('image')) return '/storage/emulated/0/Pictures/Sutra';
-    if (mime.startsWith('audio')) return '/storage/emulated/0/Music/Sutra';
-    // documents & others
-    return '/storage/emulated/0/Documents/Sutra';
-  }
-
-  Future<bool> _ensureDirExists(String path) async {
-    try {
-      final dir = Directory(path);
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-      }
-      return true;
-    } catch (e) {
-      debugPrint('Failed to create dir $path: $e');
-      return false;
-    }
-  }
-
   Future<void> _saveAttachment(ChatMessage m) async {
     final raw = m.attachmentUrl;
     if (raw == null || raw.isEmpty) {
@@ -809,112 +725,28 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     }
 
     try {
-      final mime = (m.attachmentType ?? '').isNotEmpty ? m.attachmentType! : guessMime(_deriveFileName(raw));
+      final mime = m.attachmentType ?? guessMime(_deriveFileName(raw));
       final fileName = _deriveFileName(raw);
-      final publicDir = Platform.isAndroid ? _publicFolderForMime(mime) : null;
 
-      // On Android: request legacy storage permission only (best-effort)
       if (Platform.isAndroid) {
-        try {
-          final status = await Permission.storage.request();
-          // We continue even if denied because writing to app-specific dir may still work.
-          debugPrint('Storage permission status: $status');
-        } catch (_) {}
+        // request permission (best-effort); MediaStore APIs used in MediaSaver might not need WRITE_EXTERNAL_STORAGE on Q+
+        await Permission.storage.request();
       }
 
-      if (Platform.isAndroid && publicDir != null) {
-        final ok = await _ensureDirExists(publicDir);
-        if (!ok) {
-          _snack('Could not create folder. Saving to app documents instead.');
-        } else {
-          final savePath = '$publicDir/$fileName';
+      final saved = await MediaSaver.saveIncoming(
+        source: raw,
+        mimeType: mime,
+        suggestedFileName: fileName,
+        onProgress: (received, total) {
+          final pct = (total > 0) ? (received / total * 100).toStringAsFixed(0) : '';
+          if (pct.isNotEmpty) _snack('Downloading $fileName — $pct%');
+        },
+      );
 
-          // If remote -> download, else copy
-          if (raw.startsWith('http') || raw.startsWith('https')) {
-            ScaffoldMessenger.of(context).removeCurrentSnackBar();
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Downloading...')));
-
-            await _dio.download(
-              raw,
-              savePath,
-              onReceiveProgress: (received, total) {
-                if (total > 0) {
-                  final pct = (received / total * 100).toStringAsFixed(0);
-                  ScaffoldMessenger.of(context).removeCurrentSnackBar();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Downloading $fileName — $pct%')),
-                  );
-                }
-              },
-              options: dio.Options(followRedirects: true, receiveTimeout: Duration.zero),
-            );
-
-            ScaffoldMessenger.of(context).removeCurrentSnackBar();
-            _snack('Saved to $savePath');
-
-            return;
-          } else {
-            final src = File(raw);
-            if (!await src.exists()) {
-              _snack('Source file not found.');
-              return;
-            }
-            await src.copy(savePath);
-            _snack('Saved to $savePath');
-            return;
-          }
-        }
-      }
-
-      // Fallback: save into app-specific external directory
-      Directory? baseDir;
-      if (Platform.isAndroid) {
-        baseDir = await getExternalStorageDirectory();
+      if (saved != null) {
+        _snack('Saved: $saved');
       } else {
-        baseDir = await getApplicationDocumentsDirectory();
-      }
-
-      if (baseDir == null) {
-        _snack('Unable to determine storage directory.');
-        return;
-      }
-
-      final saveDir = Directory('${baseDir.path}/ChatterlyDownloads');
-      if (!await saveDir.exists()) {
-        await saveDir.create(recursive: true);
-      }
-
-      final savePath = '${saveDir.path}/$fileName';
-
-      if (raw.startsWith('http') || raw.startsWith('https')) {
-        ScaffoldMessenger.of(context).removeCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Downloading...')));
-
-        await _dio.download(
-          raw,
-          savePath,
-          onReceiveProgress: (received, total) {
-            if (total > 0) {
-              final pct = (received / total * 100).toStringAsFixed(0);
-              ScaffoldMessenger.of(context).removeCurrentSnackBar();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Downloading $fileName — $pct%')),
-              );
-            }
-          },
-          options: dio.Options(followRedirects: true, receiveTimeout: Duration.zero),
-        );
-
-        ScaffoldMessenger.of(context).removeCurrentSnackBar();
-        _snack('Saved to $savePath');
-      } else {
-        final src = File(raw);
-        if (!await src.exists()) {
-          _snack('Source file not found.');
-          return;
-        }
-        await src.copy(savePath);
-        _snack('Saved to $savePath');
+        _snack('Save failed');
       }
     } catch (e) {
       debugPrint('Save error: $e');
@@ -927,102 +759,33 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     try {
       final id = m.id;
       if (id.isEmpty) return;
-      if (_autoSaved.contains(id)) return; // already saved
+      if (_autoSaved.contains(id)) return;
+      _autoSaved.add(id);
 
       final raw = m.attachmentUrl;
       if (raw == null || raw.isEmpty) return;
 
-      _autoSaved.add(id); // mark to avoid duplicates
-
-      final mime = (m.attachmentType ?? '').isNotEmpty ? m.attachmentType! : guessMime(_deriveFileName(raw));
+      final mime = m.attachmentType ?? guessMime(_deriveFileName(raw));
       final fileName = _deriveFileName(raw);
-      final publicDir = Platform.isAndroid ? _publicFolderForMime(mime) : null;
-
-      // Try to save silently to public folder first (best-effort)
-      if (Platform.isAndroid && publicDir != null) {
-        final ok = await _ensureDirExists(publicDir);
-        if (ok) {
-          final savePath = '$publicDir/$fileName';
-          if (!(raw.startsWith('http') || raw.startsWith('https'))) {
-            final src = File(raw);
-            if (await src.exists()) {
-              await src.copy(savePath);
-              debugPrint('Auto-saved local file to $savePath');
-              if (mounted) _snack('Attachment saved: $fileName');
-              return;
-            } else {
-              debugPrint('Auto-save: source not found $raw');
-            }
-          } else {
-            try {
-              await _dio.download(
-                raw,
-                savePath,
-                options: dio.Options(followRedirects: true, receiveTimeout: Duration.zero),
-                onReceiveProgress: (a, b) {},
-              );
-              debugPrint('Auto-saved remote file to $savePath');
-              if (mounted) _snack('Attachment saved: $fileName');
-              return;
-            } catch (e) {
-              debugPrint('Auto-save remote->public failed: $e');
-              // fallthrough to app-specific save
-            }
-          }
-        } else {
-          debugPrint('Auto-save: could not create public dir $publicDir');
-        }
-      }
-
-      // fallback to app-specific external
-      Directory? baseDir;
-      if (Platform.isAndroid) {
-        baseDir = await getExternalStorageDirectory();
-      } else {
-        baseDir = await getApplicationDocumentsDirectory();
-      }
-
-      if (baseDir == null) {
-        debugPrint('Auto-save: cannot determine base dir');
-        return;
-      }
-
-      final saveDir = Directory('${baseDir.path}/ChatterlyDownloads');
-      if (!await saveDir.exists()) {
-        await saveDir.create(recursive: true);
-      }
-
-      final savePath = '${saveDir.path}/$fileName';
-
-      if (!(raw.startsWith('http') || raw.startsWith('https'))) {
-        final src = File(raw);
-        if (await src.exists()) {
-          await src.copy(savePath);
-          debugPrint('Auto-saved local file to $savePath');
-          if (mounted) _snack('Attachment saved: $fileName');
-        } else {
-          debugPrint('Auto-save: source not found $raw');
-        }
-        return;
-      }
-
-      await _dio.download(
-        raw,
-        savePath,
-        options: dio.Options(followRedirects: true, receiveTimeout: Duration.zero),
-        onReceiveProgress: (a, b) {},
-      );
-
-      debugPrint('Auto-saved remote file to $savePath');
-      if (mounted) _snack('Attachment saved: $fileName');
+      final saved = await MediaSaver.saveIncoming(source: raw, mimeType: mime, suggestedFileName: fileName);
+      if (saved != null && mounted) _snack('Attachment saved: $fileName');
     } catch (e) {
       debugPrint('Auto-save failed: $e');
-    } finally {
-      // keep id in set to avoid repeated attempts; if you want retry on failure remove it here
     }
   }
 
-  // ================== UI ==================
+  // ================== Helpers ==================
+  String _deriveFileName(String raw) {
+    try {
+      final uri = Uri.parse(raw);
+      final name = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : '';
+      if (name.isNotEmpty) return name;
+    } catch (_) {}
+    return 'file_${DateTime.now().millisecondsSinceEpoch}';
+  }
+
+  String _getPublicDirForMime(String mime) => FileUtils.publicDirForMime(mime);
+
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -1039,8 +802,226 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     });
   }
 
+  // ================== CALL: helpers & UI ==================
+
+  Future<bool> _ensurePermissions({required bool video}) async {
+    // 1. Request Microphone
+    var micStatus = await Permission.microphone.status;
+    if (!micStatus.isGranted) {
+      micStatus = await Permission.microphone.request();
+    }
+    if (!micStatus.isGranted) {
+      _snack('Microphone permission is required.');
+      return false;
+    }
+
+    // 2. Request Camera (if video call)
+    if (video) {
+      var camStatus = await Permission.camera.status;
+      if (!camStatus.isGranted) {
+        camStatus = await Permission.camera.request();
+      }
+      if (!camStatus.isGranted) {
+        _snack('Camera permission is required.');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<bool> _validateCallPrereqs({required bool video}) async {
+    if (_loading) {
+      _snack('Still setting up chat — please wait a moment.');
+      return false;
+    }
+    if (_token == null || _token!.isEmpty || _myUserId == null || _myUserId!.isEmpty || _roomId == null || _roomId!.isEmpty) {
+      _snack('Cannot start call: missing auth or conversation info.');
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _startVoiceCall() async {
+    if (!await _validateCallPrereqs(video: false)) return;
+    final ok = await _ensurePermissions(video: false);
+    if (!ok) {
+      _snack('Microphone permission required for voice calls.');
+      return;
+    }
+
+    // Signal server
+    _callSocket.emitCallInitiate(to: widget.chatUserId, conversationId: _roomId!, callType: 'voice');
+
+    // Navigate with SHARED socket
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => CallScreen(
+        localUserId: _myUserId!,
+        remoteUserId: widget.chatUserId,
+        conversationId: _roomId!,
+        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+        isCaller: true,
+        video: false,
+      ),
+    ));
+  }
+
+  Future<void> _startVideoCall() async {
+    if (!await _validateCallPrereqs(video: true)) return;
+    final ok = await _ensurePermissions(video: true);
+    if (!ok) {
+      _snack('Camera permissions required.');
+      return;
+    }
+
+    _callSocket.emitCallInitiate(to: widget.chatUserId, conversationId: _roomId!, callType: 'video');
+
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => CallScreen(
+        localUserId: _myUserId!,
+        remoteUserId: widget.chatUserId,
+        conversationId: _roomId!,
+        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+        isCaller: true,
+        video: true,
+      ),
+    ));
+  }
+
+  void _registerCallSocketHandlers() {
+    _callSocket.onIncomingCall.listen((payload) {
+      final map = payload;
+      debugPrint('CALL: incoming-call -> $map');
+
+      // ignore if it's for other conversation
+      final convId = (map['conversationId'] ?? map['roomId'] ?? map['conversation'])?.toString();
+      if (convId != null && _roomId != null && convId != _roomId) {
+        debugPrint('CALL: incoming-call for different conversation ($convId) — ignoring');
+        return;
+      }
+
+      if (_incomingDialogVisible) {
+        debugPrint('CALL: incoming dialog already visible — ignoring duplicate event');
+        return;
+      }
+
+      final from = (map['from'] ?? map['fromUserId'] ?? map['callerId'])?.toString() ?? '';
+      final fromName = (map['fromName'] ?? map['callerName'] ?? 'Caller').toString();
+      final callType = (map['callType'] ?? 'voice').toString();
+      final callId = (map['callId'] ?? '').toString();
+
+      _showIncomingCallDialog(
+        callerId: from,
+        callerName: fromName,
+        callType: callType,
+        callId: callId.isEmpty ? null : callId,
+        payload: map,
+      );
+    });
+
+    _callSocket.onCallAnswered.listen((payload) {
+      debugPrint('CALL: call-answered -> $payload');
+      // CallScreen (caller) should listen too and progress to WebRTC established state.
+    });
+
+    _callSocket.onCallDeclined.listen((payload) {
+      debugPrint('CALL: call-declined -> $payload');
+      _snack('Call declined');
+    });
+
+    _callSocket.onCallEnded.listen((payload) {
+      debugPrint('CALL: call-ended -> $payload');
+      _snack('Call ended');
+    });
+  }
+
+  // ==========================================================
+  // Incoming-call popup
+  // ==========================================================
+  void _showIncomingCallDialog({
+    required String callerId,
+    required String callerName,
+    required String callType,
+    String? callId,
+    Map<String, dynamic>? payload,
+  }) {
+    _incomingDialogVisible = true;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => WillPopScope(
+        onWillPop: () async => false,
+        child: AlertDialog(
+          title: Text('Incoming ${callType == 'video' ? 'Video' : 'Voice'} call'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('$callerName is calling'),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.of(dialogContext).pop();
+                      _incomingDialogVisible = false;
+                      _acceptCall(callerId: callerId, callId: callId, callType: callType, payload: payload);
+                    },
+                    icon: const Icon(Icons.call),
+                    label: const Text('Accept'),
+                  ),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
+                    onPressed: () {
+                      Navigator.of(dialogContext).pop();
+                      _incomingDialogVisible = false;
+                      _declineCall(callerId: callerId, callId: callId);
+                    },
+                    icon: const Icon(Icons.call_end),
+                    label: const Text('Decline'),
+                  ),
+                ],
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _declineCall({required String callerId, String? callId}) {
+    debugPrint('CALL: decline -> to=$callerId callId=$callId');
+    _callSocket.emitDecline(to: callerId, conversationId: _roomId!, reason: 'declined');
+  }
+
+  Future<void> _acceptCall({required String callerId, String? callId, required String callType, Map<String, dynamic>? payload}) async {
+    final ok = await _ensurePermissions(video: callType == 'video');
+    if (!ok) {
+      _callSocket.emitDecline(to: callerId, conversationId: _roomId!, reason: 'permissions-denied');
+      return;
+    }
+
+    // Extract offer if it arrived with the call
+    final offerSdp = payload?['offer'];
+
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => CallScreen(
+        localUserId: _myUserId!,
+        remoteUserId: callerId,
+        conversationId: _roomId!,
+        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+        isCaller: false,
+        video: callType == 'video',
+        initialOffer: offerSdp, // <--- Pass the offer to avoid "Waiting..." forever
+      ),
+    ));
+  }
   // ---- Build helpers (header, messages, input) ----
   Widget _buildHeader() {
+    final callEnabled = !_loading && _roomId != null && _myUserId != null;
     return FadeTransition(
       opacity: _headerController,
       child: SlideTransition(
@@ -1149,7 +1130,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                 ),
                 child: IconButton(
                   icon: const Icon(Icons.videocam, color: Color(0xff0f766e)),
-                  onPressed: () {},
+                  onPressed: callEnabled ? _startVideoCall : null,
                   padding: const EdgeInsets.all(8),
                 ),
               ),
@@ -1161,7 +1142,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                 ),
                 child: IconButton(
                   icon: const Icon(Icons.call, color: Color(0xff0f766e)),
-                  onPressed: () {},
+                  onPressed: callEnabled ? _startVoiceCall : null,
                   padding: const EdgeInsets.all(8),
                 ),
               ),
@@ -1225,69 +1206,23 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
               ],
             ),
           )
-              : ListView.builder(
-            controller: _scroll,
-            reverse: true,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-            itemCount: _messages.length,
-            itemBuilder: (_, index) {
-              final message = _messages[_messages.length - 1 - index];
-
-              // compute playback progress for this message
-              final playbackProgress = (_playingMessageId == message.id && _audioDuration.inMilliseconds > 0)
-                  ? (_audioPosition.inMilliseconds / _audioDuration.inMilliseconds).clamp(0.0, 1.0)
-                  : 0.0;
-
-              return TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0.0, end: 1.0),
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut,
-                builder: (context, value, child) {
-                  return Opacity(
-                    opacity: value,
-                    child: Transform.translate(
-                      offset: Offset(0, 10 * (1 - value)),
-                      child: child,
-                    ),
-                  );
-                },
-                child: Align(
-                  alignment:
-                  message.isSentByMe ? Alignment.centerRight : Alignment.centerLeft,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () {
-                      // If image -> open full-screen viewer
-                      if (_isImageMessage(message)) {
-                        _openImageViewer(message);
-                        return;
-                      }
-                      // If audio -> play/pause
-                      if (_isAudioMessage(message)) {
-                        _playOrPauseAudioForMessage(message);
-                        return;
-                      }
-                      // else: keep original behaviour or future actions
-                    },
-                    child: MessageBubble(
-                      message: message,
-                      maxBubbleWidth: maxBubbleWidth,
-                      onLongPress: _onMessageLongPress,
-
-                      // NEW: audio wiring props
-                      isAudio: _isAudioMessage(message),
-                      onPlay: () => _playOrPauseAudioForMessage(message),
-                      isPlaying: _playingMessageId == message.id,
-                      uploadProgress: message.uploadProgress ?? 0.0,
-                      playbackProgress: playbackProgress,
-
-                      // NEW: save/download callback
-                      onSave: () => _saveAttachment(message),
-                    ),
-                  ),
-                ),
-              );
+              : MessageList(
+            messages: _messages,
+            onTap: (m) {
+              if (_isImageMessage(m)) {
+                _openImageViewer(m);
+              } else if (_isAudioMessage(m)) {
+                _playOrPauseAudioForMessage(m);
+              }
             },
+            onSave: _saveAttachment,
+            onLongPress: _onMessageLongPress,
+            onPlay: _playOrPauseAudioForMessage,
+            isAudioMessage: _isAudioMessage,
+            maxBubbleWidth: maxBubbleWidth,
+            playingMessageId: _playingMessageId,
+            audioDuration: _audioDuration,
+            audioPosition: _audioPosition,
           ),
         ),
         if (_peerTyping)
@@ -1367,9 +1302,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                       color: const Color(0xfff0fdf4),
                       borderRadius: BorderRadius.circular(24),
                       border: Border.all(
-                        color: _composerFocus.hasFocus
-                            ? const Color(0xff0f766e).withOpacity(0.3)
-                            : Colors.transparent,
+                        color: _composerFocus.hasFocus ? const Color(0xff0f766e).withOpacity(0.3) : Colors.transparent,
                         width: 2,
                       ),
                     ),
@@ -1416,9 +1349,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                   child: _composer.text.trim().isEmpty
                       ? Container(
                     decoration: BoxDecoration(
-                      color: _isRecording
-                          ? Colors.red[300]
-                          : const Color(0xff0f766e).withOpacity(0.1),
+                      color: _isRecording ? Colors.red[300] : const Color(0xff0f766e).withOpacity(0.1),
                       shape: BoxShape.circle,
                     ),
                     child: GestureDetector(
@@ -1451,6 +1382,70 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _onMessageLongPress(ChatMessage m) async {
+    final emoji = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Wrap(
+              alignment: WrapAlignment.center,
+              children: ['👍', '❤️', '😂', '😮', '😢', '🙏']
+                  .map((e) => Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: InkWell(onTap: () => Navigator.pop(context, e), child: Text(e, style: const TextStyle(fontSize: 24))),
+              ))
+                  .toList(),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Reply'),
+              onTap: () => Navigator.pop(context, '::reply::'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+
+    if (!mounted || emoji == null) return;
+
+    if (emoji == '::reply::') {
+      setState(() => _replyTo = m);
+      _composerFocus.requestFocus();
+      return;
+    }
+
+    final i = _messages.indexWhere((x) => x.id == m.id);
+    if (i != -1) {
+      setState(() => _messages[i] = _messages[i].copyWith(reaction: emoji));
+      _persistCache();
+    }
+  }
+
+  void _openImageViewer(ChatMessage m) {
+    final src = m.attachmentUrl ?? '';
+    if (src.isEmpty) {
+      _snack('No image to show');
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => FullScreenImagePage(
+          tag: 'image_${m.id}',
+          imageSource: src,
+          isNetwork: src.startsWith('http') || src.startsWith('https'),
+        ),
       ),
     );
   }
@@ -1488,95 +1483,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
               ),
               _buildInputArea(),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // Long-press actions (kept original emoji + reply sheet)
-  void _onMessageLongPress(ChatMessage m) async {
-    final emoji = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.center,
-              children: ['👍','❤️','😂','😮','😢','🙏'].map((e) => Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: InkWell(onTap: () => Navigator.pop(context, e), child: Text(e, style: const TextStyle(fontSize: 24))),
-              )).toList(),
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.reply),
-              title: const Text('Reply'),
-              onTap: () => Navigator.pop(context, '::reply::'),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-
-    if (!mounted || emoji == null) return;
-
-    if (emoji == '::reply::') {
-      setState(() => _replyTo = m);
-      // focus input so user knows they're replying
-      _composerFocus.requestFocus();
-      return;
-    }
-
-    final i = _messages.indexWhere((x) => x.id == m.id);
-    if (i != -1) {
-      setState(() => _messages[i] = _messages[i].copyWith(reaction: emoji));
-      _persistCache();
-    }
-  }
-}
-
-/// Fullscreen image viewer (uses InteractiveViewer for pinch/zoom)
-class FullScreenImagePage extends StatelessWidget {
-  final String tag;
-  final String imageSource;
-  final bool isNetwork;
-
-  const FullScreenImagePage({
-    Key? key,
-    required this.tag,
-    required this.imageSource,
-    required this.isNetwork,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    Widget imageWidget;
-    if (isNetwork) {
-      imageWidget = Image.network(imageSource, fit: BoxFit.contain);
-    } else {
-      imageWidget = Image.file(File(imageSource), fit: BoxFit.contain);
-    }
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        elevation: 0,
-        leading: IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.of(context).pop()),
-      ),
-      body: Center(
-        child: Hero(
-          tag: tag,
-          child: InteractiveViewer(
-            minScale: 1.0,
-            maxScale: 5.0,
-            child: imageWidget,
           ),
         ),
       ),
