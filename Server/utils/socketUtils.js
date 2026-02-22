@@ -6,6 +6,11 @@ import Conversation from "../models/Conversation.js";
 let ioRef = null;
 export const getIO = () => ioRef;
 
+/**
+ * initSocket(io)
+ * - Sets up socket.io event handlers for messaging, delivery/read receipts,
+ *   presence, conversation join/leave, and WebRTC signalling (calls).
+ */
 export const initSocket = (io) => {
   ioRef = io;
 
@@ -14,6 +19,7 @@ export const initSocket = (io) => {
 
   io.on("connection", async (socket) => {
     try {
+      // Accept token from auth or query (backwards compatibility)
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
       if (!token) {
         console.warn("❌ Token missing — disconnecting socket:", socket.id);
@@ -24,8 +30,13 @@ export const initSocket = (io) => {
       socket.userId = decoded.id?.toString?.() ?? decoded.id;
       console.log(`✅ Socket Connected: ${socket.id} | User: ${socket.userId}`);
 
+      // Join user's personal room for direct signaling (one or more sockets per user)
       socket.join(socket.userId);
+
+      // Broadcast presence to other sockets
       socket.broadcast.emit("user:online", { userId: socket.userId });
+
+      // Track conversations this socket has joined
       socket.joinedConversations = new Set();
 
       /* ------------------------
@@ -42,7 +53,6 @@ export const initSocket = (io) => {
           console.error("joinHandler error:", err?.message || err);
         }
       };
-
       const leaveHandler = ({ conversationId, roomId }) => {
         try {
           const convId = (conversationId || roomId || "").toString();
@@ -57,11 +67,13 @@ export const initSocket = (io) => {
 
       socket.on("join:conversation", joinHandler);
       socket.on("leave:conversation", leaveHandler);
+      // Backwards-compatible aliases
       socket.on("join", joinHandler);
       socket.on("leave", leaveHandler);
 
       /* ------------------------
          CHAT: incoming message send
+         Expects payload compatible with your createMessageAndBroadcast service
       ------------------------- */
       socket.on("message:send", async (payload) => {
         try {
@@ -70,11 +82,13 @@ export const initSocket = (io) => {
             return socket.emit("message:error", { message: "Missing conversationId" });
           }
 
+          // Auto-join fallback if socket hasn't joined conversation yet
           if (!socket.joinedConversations.has(String(conversationId))) {
             socket.join(conversationId.toString());
             socket.joinedConversations.add(conversationId.toString());
           }
 
+          // Lazy import/service separation (keeps file lighter in tests)
           const { createMessageAndBroadcast } = await import("../services/socketService.js");
           await createMessageAndBroadcast(ioRef, payload);
 
@@ -153,12 +167,14 @@ export const initSocket = (io) => {
       });
 
       /* ============================================================
-         WEBRTC SIGNALING
+         WEBRTC SIGNALING: call-initiate, call-user, answer-call, ice-candidate, end-call, decline
+         Active-calls map prevents races and double-call in same conversation
          ============================================================ */
 
       /**
-       * CALL INITIATE (lightweight notify/ringing - no offer yet)
+       * CALL INITIATE (lightweight notify/ringing)
        * payload: { to, conversationId, fromName?, callType? }
+       * emits to callee: 'incoming-call' (without SDP/offer) so receiver can show ringing UI
        */
       socket.on("call-initiate", async ({ to, conversationId, fromName, callType }) => {
         try {
@@ -166,6 +182,7 @@ export const initSocket = (io) => {
             return socket.emit("call:error", { message: "Missing to/conversationId" });
           }
 
+          // Validate conversation and participants (best-effort)
           const conv = await Conversation.findById(conversationId).select("participants").lean();
           if (!conv) return socket.emit("call:error", { message: "Conversation not found" });
 
@@ -177,24 +194,25 @@ export const initSocket = (io) => {
             return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
           }
 
+          // Check callee online
           const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (initiate)`);
             return socket.emit("callee-offline", { to });
           }
 
+          // Mark conversation as active call (preliminary)
           if (activeCalls.has(String(conversationId))) {
+            // still allow notify but also let caller know busy
             socket.emit("call:busy", { conversationId });
             return;
           }
 
-          // Set preliminary active call entry
           activeCalls.set(String(conversationId), {
             callerId: socket.userId,
             calleeId: to,
             initiatedAt: Date.now(),
             mode: callType || "voice",
-            offerSent: false, // ✅ track whether offer has been sent yet
           });
 
           console.log(`📲 ${socket.userId} initiated call (notify) -> ${to} (conv ${conversationId})`);
@@ -204,7 +222,7 @@ export const initSocket = (io) => {
             conversationId,
             fromName: fromName || null,
             callType: callType || "voice",
-            notifyOnly: true,
+            notifyOnly: true, // indicates no offer attached yet
           });
         } catch (err) {
           console.error("❌ call-initiate error:", err?.message || err);
@@ -213,12 +231,9 @@ export const initSocket = (io) => {
       });
 
       /**
-       * CALL USER (full signaling with SDP offer)
+       * CALL USER (full signaling with offer)
        * payload: { to, conversationId, offer, callId? }
-       *
-       * ✅ FIXED: If call-initiate already set activeCalls for this conversation,
-       * we UPDATE the entry instead of returning call:busy.
-       * This prevents the offer from being blocked after ringing.
+       * emits to callee: 'incoming-call' (with offer)
        */
       socket.on("call-user", async ({ to, conversationId, offer, callId }) => {
         try {
@@ -228,6 +243,7 @@ export const initSocket = (io) => {
             });
           }
 
+          // Validate conversation & participants
           const conv = await Conversation.findById(conversationId).select("participants").lean();
           if (!conv) return socket.emit("call:error", { message: "Conversation not found" });
 
@@ -239,39 +255,25 @@ export const initSocket = (io) => {
             return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
           }
 
+          // Check if callee online (user personal room exists)
           const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (call-user)`);
             return socket.emit("callee-offline", { to });
           }
 
-          // ✅ FIXED: Check if this is from the same caller (after call-initiate)
-          // If so, update the entry. If it's a completely different caller, then it's busy.
+          // Prevent multiple active calls in same conversation
           if (activeCalls.has(String(conversationId))) {
-            const existing = activeCalls.get(String(conversationId));
-
-            if (String(existing.callerId) === String(socket.userId)) {
-              // Same caller sending offer after initiate — update entry, don't block
-              activeCalls.set(String(conversationId), {
-                ...existing,
-                startedAt: Date.now(),
-                callId: callId || null,
-                offerSent: true,
-              });
-            } else {
-              // Different caller — truly busy
-              return socket.emit("call:busy", { conversationId });
-            }
-          } else {
-            // No prior initiate — set fresh entry
-            activeCalls.set(String(conversationId), {
-              callerId: socket.userId,
-              calleeId: to,
-              startedAt: Date.now(),
-              callId: callId || null,
-              offerSent: true,
-            });
+            return socket.emit("call:busy", { conversationId });
           }
+
+          // Mark conversation as active call
+          activeCalls.set(String(conversationId), {
+            callerId: socket.userId,
+            calleeId: to,
+            startedAt: Date.now(),
+            callId: callId || null,
+          });
 
           console.log(`📞 ${socket.userId} is calling ${to} (conversation ${conversationId})`);
 
@@ -290,6 +292,7 @@ export const initSocket = (io) => {
       /**
        * ANSWER CALL
        * payload: { to, conversationId, answer }
+       * emits to caller: 'call-answered'
        */
       socket.on("answer-call", ({ to, conversationId, answer }) => {
         try {
@@ -368,13 +371,14 @@ export const initSocket = (io) => {
       });
 
       /* ------------------------
-         DISCONNECT
+         DISCONNECT: cleanup and notify other participant if in active call
       ------------------------- */
       socket.on("disconnect", () => {
         try {
           console.log(`❌ Socket disconnected: ${socket.id} | User: ${socket.userId}`);
           socket.broadcast.emit("user:offline", { userId: socket.userId });
 
+          // Cleanup any active calls involving this user
           for (const [convId, call] of activeCalls.entries()) {
             if (String(call.callerId) === String(socket.userId) || String(call.calleeId) === String(socket.userId)) {
               activeCalls.delete(convId);
@@ -393,7 +397,6 @@ export const initSocket = (io) => {
           console.error("disconnect handler error:", err?.message || err);
         }
       });
-
     } catch (err) {
       console.error("❌ Socket authentication/connection error:", err?.message || err);
       try {
@@ -405,6 +408,10 @@ export const initSocket = (io) => {
   });
 };
 
+/**
+ * Helper: emitMessageToRoom
+ * Use this from other modules to broadcast a message to a conversation room
+ */
 export function emitMessageToRoom(conversationId, payload) {
   if (!ioRef || !conversationId) return;
   try {

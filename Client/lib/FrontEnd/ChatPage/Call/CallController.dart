@@ -32,19 +32,25 @@ class CallController {
     required this.conversationId,
     required this.socket,
   });
-
+  StreamSubscription? _callEndedSub;
+  StreamSubscription? _callDeclinedSub;
+  StreamSubscription? _callAnsweredSub;
+  StreamSubscription? _iceSub;
   Future<void> init() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
-    // socket.onIncomingCall.listen(_onIncomingCall);
 
-    socket.onCallAnswered.listen(_onCallAnswered);
-    socket.onIceCandidate.listen(_onIceCandidate);
-    socket.onCallEnded.listen((_) => _onCallEnded());
-    socket.onCallDeclined.listen((_) => _onCallDeclined());
+    _callAnsweredSub = socket.onCallAnswered.listen(_onCallAnswered);
+    _iceSub = socket.onIceCandidate.listen(_onIceCandidate);
+    _callEndedSub = socket.onCallEnded.listen((_) => _onCallEnded());
+    _callDeclinedSub = socket.onCallDeclined.listen((_) => _onCallDeclined());
   }
 
   Future<void> dispose() async {
+    _callAnsweredSub?.cancel();
+    _iceSub?.cancel();
+    _callEndedSub?.cancel();
+    _callDeclinedSub?.cancel();
     try {
       await localRenderer.dispose();
       await remoteRenderer.dispose();
