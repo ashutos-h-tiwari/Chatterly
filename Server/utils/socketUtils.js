@@ -238,8 +238,8 @@ export const initSocket = (io) => {
           }
 
           // ✅ Better online check: look for specific user socket
-          const calleeSocket = ioRef.sockets.sockets.get(String(to));
-          const calleeOnline = calleeSocket && calleeSocket.connected;
+            const calleeSockets = ioRef.sockets.adapter.rooms.get(String(to));
+            const calleeOnline = calleeSockets && calleeSockets.size > 0;
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (initiate)`);
             return socket.emit("callee-offline", { to });
@@ -308,8 +308,8 @@ export const initSocket = (io) => {
           }
 
           // ✅ Better online check
-          const calleeSocket = ioRef.sockets.sockets.get(String(to));
-          const calleeOnline = calleeSocket && calleeSocket.connected;
+          const calleeSockets = ioRef.sockets.adapter.rooms.get(String(to));
+          const calleeOnline = calleeSockets && calleeSockets.size > 0;
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (call-user)`);
             return socket.emit("callee-offline", { to });
