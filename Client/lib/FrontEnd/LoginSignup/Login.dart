@@ -42,11 +42,11 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
     // --- ADJUSTMENT START: Auto-Login Logic ---
     // This waits for the first frame to render before triggering login
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (kDebugMode) {
-        _debugAutoLogin();
-      }
-    });
+    // WidgetsBinding.instance.addPostFrameCallback((_) {
+    //   if (kDebugMode) {
+    //     _debugAutoLogin();
+    //   }
+    // });
     // --- ADJUSTMENT END ---
 
     _introController = AnimationController(vsync: this, duration: const Duration(seconds: 1));
@@ -75,11 +75,11 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   }
 
   // --- ADJUSTMENT: Helper method for auto-login ---
-  void _debugAutoLogin() {
-    _nameController.text = "ashutosh@gmail.com";
-    _passwordController.text = "ashutosh123";
-    _threadIn(); // Triggers your existing login function
-  }
+  // void _debugAutoLogin() {
+  //   _nameController.text = "ashutosh@gmail.com";
+  //   _passwordController.text = "ashutosh123";
+  //   _threadIn(); // Triggers your existing login function
+  // }
 
   @override
   void dispose() {

@@ -246,10 +246,16 @@ export const initSocket = (io) => {
           }
 
           // Mark conversation as active call (preliminary)
+          // ✅ Ab yeh karo — sirf call-user pe busy check karo, call-initiate pe nahi
           if (activeCalls.has(String(conversationId))) {
-            // still allow notify but also let caller know busy
-            socket.emit("call:busy", { conversationId });
-            return;
+            const existing = activeCalls.get(String(conversationId));
+            // Agar same caller dobara try kar raha hai — allow karo
+            if (String(existing.callerId) !== String(socket.userId)) {
+              socket.emit('call:busy', { conversationId });
+              return;
+            }
+            // Same caller retry — activeCalls overwrite karo
+            activeCalls.delete(String(conversationId));
           }
 
           activeCalls.set(String(conversationId), {

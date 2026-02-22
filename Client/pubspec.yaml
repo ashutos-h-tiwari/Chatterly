@@ -52,7 +52,7 @@ dependencies:
   device_info_plus:
   flutter_webrtc:
   uuid:
-
+  provider:
 
   #  agora_rtc_engine:
 
