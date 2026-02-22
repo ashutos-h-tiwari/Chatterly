@@ -322,8 +322,15 @@ export const initSocket = (io) => {
           }
 
           // Prevent multiple active calls in same conversation
+          // ✅ FIX: Allow same caller who already did call-initiate
           if (activeCalls.has(String(conversationId))) {
-            return socket.emit("call:busy", { conversationId });
+            const existing = activeCalls.get(String(conversationId));
+            if (String(existing.callerId) !== String(socket.userId)) {
+              // Different caller — truly busy
+              return socket.emit("call:busy", { conversationId });
+            }
+            // Same caller continuing from call-initiate — allow and overwrite
+            console.log(`🔄 Same caller continuing from call-initiate — overwriting activeCalls`);
           }
 
           // Mark conversation as active call
