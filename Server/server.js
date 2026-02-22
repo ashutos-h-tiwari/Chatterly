@@ -12,6 +12,7 @@ import { connectDB } from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
+import statusRoutes from "./routes/statusRoutes.js"; // ✅ NEW: Status routes
 import keyRoutes from "./routes/keyRoutes.js"; // optional, ensure file exists
 import { apiLimiter } from "./middlewares/rateLimiter.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
@@ -75,6 +76,7 @@ console.log("📍 Registering API routes...");
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/status", statusRoutes); // ✅ NEW: Status routes
 
 // Optional keys route (E2EE key handling)
 try {
@@ -102,7 +104,7 @@ const io = new IOServer(server, {
   pingInterval: 20000,
   pingTimeout: 25000,
 });
-initSocket(io);
+const cleanupInterval = initSocket(io); // ✅ Capture cleanup interval
 
 // ---------- Start server ----------
 const PORT = process.env.PORT || 5000;
@@ -117,3 +119,22 @@ connectDB(process.env.MONGO_URI)
     console.error("❌ MongoDB connection failed:", err?.message ?? err);
     process.exit(1);
   });
+
+// ✅ Graceful shutdown: clean up intervals and close server
+process.on("SIGTERM", () => {
+  console.log("⚠️ SIGTERM signal received: closing HTTP server");
+  clearInterval(cleanupInterval); // ✅ Clear cleanup interval
+  server.close(() => {
+    console.log("✅ HTTP server closed");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("⚠️ SIGINT signal received: closing HTTP server");
+  clearInterval(cleanupInterval); // ✅ Clear cleanup interval
+  server.close(() => {
+    console.log("✅ HTTP server closed");
+    process.exit(0);
+  });
+});

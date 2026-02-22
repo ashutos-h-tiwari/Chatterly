@@ -6,6 +6,36 @@ import Conversation from "../models/Conversation.js";
 let ioRef = null;
 export const getIO = () => ioRef;
 
+// ✅ TURN/ICE SERVER CONFIGURATION
+const ICE_SERVERS = [
+  {
+    urls: "stun:stun.l.google.com:19302", // Google STUN (requires no auth)
+  },
+  {
+    urls: "stun:stun1.l.google.com:19302",
+  },
+  // ✅ Add your TURN servers (for NAT/firewall traversal)
+  // Option 1: Public TURN (if available)
+  // {
+  //   urls: ["turn:your-turn-server.com:3478"],
+  //   username: "user",
+  //   credential: "pass"
+  // },
+  // Option 2: Use metered TURN (Metered.ca, Twilio, etc.) if needed
+];
+
+// ✅ Validate SDP format (basic check)
+const validateSDP = (sdp) => {
+  if (!sdp || typeof sdp !== "string") return false;
+  return sdp.includes("v=0") && (sdp.includes("m=audio") || sdp.includes("m=video"));
+};
+
+// ✅ Validate ICE candidate format
+const validateCandidate = (candidate) => {
+  if (!candidate) return true; // end-of-candidates is null
+  return typeof candidate === "object" && (candidate.candidate || candidate.sdpMLineIndex !== undefined);
+};
+
 /**
  * initSocket(io)
  * - Sets up socket.io event handlers for messaging, delivery/read receipts,
@@ -16,6 +46,18 @@ export const initSocket = (io) => {
 
   // Track active calls per conversation (conversationId -> call metadata)
   const activeCalls = new Map();
+  
+  // ✅ Auto-cleanup stale calls after 30 minutes
+  const callCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [convId, call] of activeCalls.entries()) {
+      const elapsed = now - (call.startedAt || call.initiatedAt || 0);
+      if (elapsed > 30 * 60 * 1000) { // 30 minutes
+        console.log(`🧹 Cleaning up stale call in conversation ${convId}`);
+        activeCalls.delete(convId);
+      }
+    }
+  }, 5 * 60 * 1000); // check every 5 minutes
 
   io.on("connection", async (socket) => {
     try {
@@ -175,6 +217,7 @@ export const initSocket = (io) => {
        * CALL INITIATE (lightweight notify/ringing)
        * payload: { to, conversationId, fromName?, callType? }
        * emits to callee: 'incoming-call' (without SDP/offer) so receiver can show ringing UI
+       * ✅ NOW INCLUDES ICE_SERVERS
        */
       socket.on("call-initiate", async ({ to, conversationId, fromName, callType }) => {
         try {
@@ -194,8 +237,9 @@ export const initSocket = (io) => {
             return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
           }
 
-          // Check callee online
-          const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
+          // ✅ Better online check: look for specific user socket
+          const calleeSocket = ioRef.sockets.sockets.get(String(to));
+          const calleeOnline = calleeSocket && calleeSocket.connected;
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (initiate)`);
             return socket.emit("callee-offline", { to });
@@ -217,12 +261,14 @@ export const initSocket = (io) => {
 
           console.log(`📲 ${socket.userId} initiated call (notify) -> ${to} (conv ${conversationId})`);
 
+          // ✅ Send ICE servers to callee
           ioRef.to(String(to)).emit("incoming-call", {
             from: socket.userId,
             conversationId,
             fromName: fromName || null,
             callType: callType || "voice",
             notifyOnly: true, // indicates no offer attached yet
+            iceServers: ICE_SERVERS, // ✅ NEW: TURN/STUN servers
           });
         } catch (err) {
           console.error("❌ call-initiate error:", err?.message || err);
@@ -234,6 +280,7 @@ export const initSocket = (io) => {
        * CALL USER (full signaling with offer)
        * payload: { to, conversationId, offer, callId? }
        * emits to callee: 'incoming-call' (with offer)
+       * ✅ NOW VALIDATES SDP & SENDS ICE_SERVERS
        */
       socket.on("call-user", async ({ to, conversationId, offer, callId }) => {
         try {
@@ -241,6 +288,11 @@ export const initSocket = (io) => {
             return socket.emit("call:error", {
               message: "Missing to/conversationId/offer",
             });
+          }
+
+          // ✅ Validate SDP offer format
+          if (!validateSDP(offer.sdp)) {
+            return socket.emit("call:error", { message: "Invalid SDP offer format" });
           }
 
           // Validate conversation & participants
@@ -255,8 +307,9 @@ export const initSocket = (io) => {
             return socket.emit("call:error", { message: "Callee is not a participant of this conversation" });
           }
 
-          // Check if callee online (user personal room exists)
-          const calleeOnline = ioRef.sockets.adapter.rooms.has(String(to));
+          // ✅ Better online check
+          const calleeSocket = ioRef.sockets.sockets.get(String(to));
+          const calleeOnline = calleeSocket && calleeSocket.connected;
           if (!calleeOnline) {
             console.log(`📴 Callee ${to} is offline (call-user)`);
             return socket.emit("callee-offline", { to });
@@ -277,11 +330,13 @@ export const initSocket = (io) => {
 
           console.log(`📞 ${socket.userId} is calling ${to} (conversation ${conversationId})`);
 
+          // ✅ Send offer + ICE servers to callee
           ioRef.to(String(to)).emit("incoming-call", {
             from: socket.userId,
             conversationId,
             offer,
             callId: callId || null,
+            iceServers: ICE_SERVERS, // ✅ NEW: TURN/STUN servers
           });
         } catch (err) {
           console.error("❌ call-user error:", err?.message || err);
@@ -317,9 +372,15 @@ export const initSocket = (io) => {
       /**
        * ICE CANDIDATES
        * payload: { to, conversationId, candidate }
+       * ✅ NOW VALIDATES CANDIDATE FORMAT
        */
       socket.on("ice-candidate", ({ to, conversationId, candidate }) => {
         try {
+          // ✅ Validate candidate format
+          if (!validateCandidate(candidate)) {
+            return socket.emit("call:error", { message: "Invalid ICE candidate format" });
+          }
+
           ioRef.to(String(to)).emit("ice-candidate", {
             from: socket.userId,
             conversationId,
@@ -370,6 +431,93 @@ export const initSocket = (io) => {
         }
       });
 
+      /* ============================================================
+         📸 STATUS EVENTS: real-time status upload, view, delete
+         ============================================================ */
+
+      /**
+       * STATUS UPLOAD (Real-time broadcast)
+       * payload: { statusId, userId, mediaUrl, mediaType, caption, user }
+       * Broadcast new status to all connected users
+       */
+      socket.on("status:upload", (payload) => {
+        try {
+          if (!payload || !payload.statusId || !payload.userId) {
+            return socket.emit("status:error", { message: "Invalid status payload" });
+          }
+
+          console.log(`📸 New status uploaded by ${payload.userId}`);
+
+          // ✅ Broadcast to all users (not just requester)
+          ioRef.emit("status:new", {
+            statusId: payload.statusId,
+            userId: payload.userId,
+            mediaUrl: payload.mediaUrl,
+            mediaType: payload.mediaType,
+            caption: payload.caption || "",
+            user: payload.user,
+            uploadedAt: new Date(),
+          });
+        } catch (err) {
+          console.error("❌ status:upload error:", err?.message || err);
+          socket.emit("status:error", { message: "Failed to upload status" });
+        }
+      });
+
+      /**
+       * STATUS VIEWED (Real-time notification)
+       * payload: { statusId, userId, viewer }
+       * Notify status owner when someone views their status
+       */
+      socket.on("status:viewed", (payload) => {
+        try {
+          if (!payload || !payload.statusId || !payload.userId) {
+            return socket.emit("status:error", { message: "Invalid view payload" });
+          }
+
+          console.log(`👁️ Status ${payload.statusId} viewed by ${socket.userId}`);
+
+          // ✅ Emit to status owner only
+          ioRef.to(String(payload.userId)).emit("status:view-notification", {
+            statusId: payload.statusId,
+            viewedBy: socket.userId,
+            viewerName: payload.viewerName || "Someone",
+            viewedAt: new Date(),
+          });
+        } catch (err) {
+          console.error("❌ status:viewed error:", err?.message || err);
+        }
+      });
+
+      /**
+       * STATUS DELETED (Real-time notification)
+       * payload: { statusId, userId }
+       * Notify all users when a status is deleted
+       */
+      socket.on("status:delete", (payload) => {
+        try {
+          if (!payload || !payload.statusId) {
+            return socket.emit("status:error", { message: "Invalid delete payload" });
+          }
+
+          // Verify ownership (check if deleter is the status owner)
+          if (String(payload.userId) !== String(socket.userId)) {
+            return socket.emit("status:error", { message: "Not authorized" });
+          }
+
+          console.log(`🗑️ Status ${payload.statusId} deleted by ${socket.userId}`);
+
+          // ✅ Broadcast deletion to all users
+          ioRef.emit("status:deleted", {
+            statusId: payload.statusId,
+            userId: payload.userId,
+            deletedAt: new Date(),
+          });
+        } catch (err) {
+          console.error("❌ status:delete error:", err?.message || err);
+        }
+      });
+
       /* ------------------------
          DISCONNECT: cleanup and notify other participant if in active call
       ------------------------- */
@@ -406,6 +554,9 @@ export const initSocket = (io) => {
       }
     }
   });
+
+  // ✅ Cleanup interval on server shutdown
+  return callCleanupInterval;
 };
 
 /**
