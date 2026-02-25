@@ -3,6 +3,7 @@ import User from "../models/User.js";
 import dotenv from "dotenv";
 dotenv.config();
 
+export const protect = auth; // alias
 export const auth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ message: "Unauthorized" });
