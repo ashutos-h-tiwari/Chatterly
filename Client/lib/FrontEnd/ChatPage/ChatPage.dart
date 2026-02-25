@@ -113,8 +113,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   StreamSubscription<PlayerState>? _playerStateSub;
 
   // Call UI state
+  // bool _incomingDialogVisible = false;
   bool _incomingDialogVisible = false;
-
+  Map<String, dynamic>? _pendingOffer; // buffers SDP offer while ringing dialog is shown
   @override
   void initState() {
     super.initState();
@@ -901,16 +902,28 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         return;
       }
 
+      // if (_incomingDialogVisible) {
+      //   debugPrint('CALL: incoming dialog already visible — ignoring duplicate event');
+      //   return;
+      // }
       if (_incomingDialogVisible) {
-        debugPrint('CALL: incoming dialog already visible — ignoring duplicate event');
+        final isNotifyOnly = map['notifyOnly'] == true;
+        final hasOffer = map['offer'] != null;
+        if (!isNotifyOnly && hasOffer) {
+          debugPrint('CALL: offer updated while dialog visible — buffering');
+          _pendingOffer = Map<String, dynamic>.from(map['offer'] as Map);
+        } else {
+          debugPrint('CALL: incoming dialog already visible — ignoring duplicate notifyOnly');
+        }
         return;
       }
-
       final from = (map['from'] ?? map['fromUserId'] ?? map['callerId'])?.toString() ?? '';
       final fromName = (map['fromName'] ?? map['callerName'] ?? 'Caller').toString();
       final callType = (map['callType'] ?? 'voice').toString();
       final callId = (map['callId'] ?? '').toString();
-
+      _pendingOffer = map['offer'] != null
+          ? Map<String, dynamic>.from(map['offer'] as Map)
+          : null;
       _showIncomingCallDialog(
         callerId: from,
         callerName: fromName,
@@ -1004,8 +1017,24 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     }
 
     // Extract offer if it arrived with the call
-    final offerSdp = payload?['offer'];
+    // final offerSdp = payload?['offer'];
+// Use buffered offer — it's the most up-to-date one received while dialog was showing
+//     final offerSdp = _pendingOffer ?? payload?['offer'];
+//     _pendingOffer = null; // clear after consuming
+    // Unwrap offer safely — ensure we pass {sdp: "...", type: "offer"} not the raw payload
+    dynamic rawOffer = _pendingOffer ?? payload?['offer'];
 
+// If rawOffer is already the correct map shape, use it
+// If it's nested (offer inside offer), unwrap
+    if (rawOffer is Map && rawOffer['offer'] != null) {
+      rawOffer = rawOffer['offer'];
+    }
+
+    final offerSdp = rawOffer != null
+        ? Map<String, dynamic>.from(rawOffer as Map)
+        : null;
+
+    _pendingOffer = null;
     if (!mounted) return;
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => CallScreen(

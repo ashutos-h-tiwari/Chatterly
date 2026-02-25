@@ -236,18 +236,47 @@ class _CallScreenState extends State<CallScreen> {
         return;
       }
 
-      final sdp  = offerData['sdp']?.toString().trim() ?? '';
-      final type = offerData['type']?.toString() ?? 'offer';
+      // final sdp  = offerData['sdp']?.toString().trim() ?? '';
+      // final type = offerData['type']?.toString() ?? 'offer';
+      //
+      // if (sdp.isEmpty || !sdp.contains('v=0')) {
+      //   print('⚠️ Invalid SDP — waiting');
+      //   _waitingForOffer = true;
+      //   return;
+      // }
+
+// Safely extract SDP — handle both String and dynamic types
+      dynamic rawSdp = offerData['sdp'];
+      dynamic rawType = offerData['type'];
+
+// If the offer map itself is nested (e.g. offerData is {sdp: {sdp: ...}})
+// unwrap it
+      if (rawSdp == null && offerData['offer'] != null) {
+        final nested = offerData['offer'];
+        if (nested is Map) {
+          rawSdp = nested['sdp'];
+          rawType = nested['type'];
+        }
+      }
+
+      String sdp = rawSdp?.toString() ?? '';
+      // Normalize line endings — WebRTC requires \r\n, socket.io strips \r
+      if (sdp.isNotEmpty && !sdp.contains('\r\n')) {
+        sdp = sdp.split('\n').map((l) => l.trimRight()).join('\r\n');
+        if (!sdp.endsWith('\r\n')) sdp += '\r\n';
+      }
+
+      final type = rawType?.toString().trim().isNotEmpty == true
+          ? rawType.toString().trim()
+          : 'offer';
 
       if (sdp.isEmpty || !sdp.contains('v=0')) {
         print('⚠️ Invalid SDP — waiting');
         _waitingForOffer = true;
         return;
       }
-
-      print('📨 Setting remote description...');
-      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
-      _remoteDescSet = true;
+      print('📨 Setting remote description — length: ${sdp.length}, type: $type');
+      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));      _remoteDescSet = true;
       _waitingForOffer = false;
 
       // Flush queued ICE candidates
@@ -311,17 +340,22 @@ class _CallScreenState extends State<CallScreen> {
           return;
         }
 
-        final sdp  = answer['sdp']?.toString().trim() ?? '';
-        final type = answer['type']?.toString() ?? 'answer';
+        String sdp = answer['sdp']?.toString() ?? '';
+        if (sdp.isNotEmpty && !sdp.contains('\r\n')) {
+          sdp = sdp.split('\n').map((l) => l.trimRight()).join('\r\n');
+          if (!sdp.endsWith('\r\n')) sdp += '\r\n';
+        }
+        final type = answer['type']?.toString().trim().isNotEmpty == true
+            ? answer['type'].toString().trim()
+            : 'answer';
 
         if (sdp.isEmpty) {
           print('⚠️ Empty SDP in answer');
           return;
         }
 
-        print('✅ Setting remote answer...');
-        await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
-        _remoteDescSet = true;
+        print('✅ Setting remote answer — length: ${sdp.length}');
+        await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));       _remoteDescSet = true;
 
         // Flush queued ICE candidates
         print('🧊 Flushing ${_iceCandidateQueue.length} queued candidates after answer');
