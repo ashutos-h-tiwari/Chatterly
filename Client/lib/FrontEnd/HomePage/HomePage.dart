@@ -1,13 +1,15 @@
 // merged_threads_page.dart
 import 'dart:convert';
 import 'package:chatterly/FrontEnd/Allchat/AllChat.dart';
+import 'package:chatterly/FrontEnd/LoginSignup/Login.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../ChatPage/ChatPage.dart';
 import '../Status page/status.dart';
 import '../profile/connectionProfile.dart';
-import '../profile/profile.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import '../profile/profileupdate.dart';
 // import ''; // <-- UPDATE this import to your actual path
 
@@ -23,27 +25,51 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Sutra – Threads',
-      theme: ThemeData(
-        brightness: Brightness.light,
-        scaffoldBackgroundColor: Colors.white,
-        useMaterial3: true,
-      ),
-      home: const ThreadsPage(),
-      routes: {
-        '/chat': (context) {
-          final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
-          final userName = args?['name'] as String? ?? 'Chat';
-          final userId = args?['id'] as String? ?? '';
-          return ChatPage(chatUserName: userName, chatUserId: userId);
-        },
+    // return MaterialApp(
+    //   debugShowCheckedModeBanner: false,
+    //   title: 'Sutra – Threads',
+    //   theme: ThemeData(
+    //     brightness: Brightness.light,
+    //     scaffoldBackgroundColor: Colors.white,
+    //     useMaterial3: true,
+    //   ),
+    //   home: const ThreadsPage(),
+    //   routes: {
+    //     '/chat': (context) {
+    //       final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+    //       final userName = args?['name'] as String? ?? 'Chat';
+    //       final userId = args?['id'] as String? ?? '';
+    //       return ChatPage(chatUserName: userName, chatUserId: userId);
+    //     },
+    //   },
+    // );
+
+      return const ThreadsPage();
+    }
+
+  }
+
+Future<void> _initFCM() async {
+  FirebaseMessaging messaging = FirebaseMessaging.instance;
+  await messaging.requestPermission();
+
+  String? token = await messaging.getToken();
+  debugPrint("🔥 FCM TOKEN: $token");
+
+  if (token != null) {
+    final prefs = await SharedPreferences.getInstance();
+    final jwt = prefs.getString("token");
+
+    await http.post(
+      Uri.parse("https://chatterly-backend-f9j0.onrender.com/api/notifications/fcm-token"),
+      headers: {
+        "Authorization": "Bearer $jwt",
+        "Content-Type": "application/json",
       },
+      body: jsonEncode({ "fcmToken": token }),
     );
   }
 }
-
 class ThreadsPage extends StatefulWidget {
   const ThreadsPage({super.key});
 
@@ -91,6 +117,7 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
   }
 
   Future<void> _bootstrap() async {
+    await _initFCM();
     try {
       final prefs = await SharedPreferences.getInstance();
       _token = prefs.getString('token');
@@ -186,71 +213,7 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
       if (mounted) setState(() => _loading = false);
     }
   }
-  // Future<void> _loadConversations() async {
-  //   setState(() {
-  //     _loading = true;
-  //     _error = null;
-  //   });
-  //
-  //   try {
-  //     final res = await http.get(
-  //       Uri.parse(kListConversations),
-  //       headers: {
-  //         'Authorization': 'Bearer $_token',
-  //         'Accept': 'application/json',
-  //       },
-  //     );
-  //
-  //     if (res.statusCode >= 200 && res.statusCode < 300) {
-  //       final body = jsonDecode(res.body);
-  //
-  //       List list = [];
-  //       if (body is List) {
-  //         list = body;
-  //       } else if (body is Map && body['conversations'] is List) {
-  //         list = body['conversations'];
-  //       } else if (body is Map && body['data'] is List) {
-  //         list = body['data'];
-  //       } else {
-  //         throw const FormatException('Unexpected conversations payload');
-  //       }
-  //
-  //       final mapped = <ThreadItem>[];
-  //       for (final raw in list) {
-  //         final conv = _parseConversation(raw);
-  //         if (conv == null) continue;
-  //
-  //         final img = _avatarFor(conv.otherUserName);
-  //         mapped.add(
-  //           ThreadItem(
-  //             conv.otherUserName,
-  //             conv.lastText ?? 'Say hi 👋',
-  //             img,
-  //             true,
-  //             id: conv.otherUserId,
-  //           ),
-  //         );
-  //       }
-  //
-  //       setState(() {
-  //         threads
-  //           ..clear()
-  //           ..addAll(mapped);
-  //       });
-  //     } else {
-  //       String msg = 'Server error: ${res.statusCode}';
-  //       try {
-  //         final err = jsonDecode(res.body);
-  //         msg = err['message']?.toString() ?? msg;
-  //       } catch (_) {}
-  //       setState(() => _error = msg);
-  //     }
-  //   } catch (e) {
-  //     setState(() => _error = 'Network error: $e');
-  //   } finally {
-  //     if (mounted) setState(() => _loading = false);
-  //   }
-  // }
+
 
   _ConvLite? _parseConversation(dynamic json) {
     if (json is! Map) return null;
@@ -363,6 +326,7 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
               Column(
                 children: [
                   // Header (glowing)
+
                   FadeTransition(
                     opacity: _headerController,
                     child: SlideTransition(
@@ -403,6 +367,16 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
                             ),
                             Row(
                               children: [
+                                _HeaderButton(
+                                  icon: Icons.logout,
+                                  onTap: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(builder: (_) => const LoginPage()),
+                                    );
+                                  },
+                                ),
+                                const SizedBox(width: 12),
                                 _HeaderButton(
                                   icon: Icons.group_add,
                                   onTap: () {

@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   socketId: { type: String, default: null }, // current socket id for presence
   isOnline: { type: Boolean, default: false },
   bio: { type: String, default: "" }
+  fcmToken: { type: String, default: null }
 }, { timestamps: true });
 
 export default mongoose.model("User", userSchema);

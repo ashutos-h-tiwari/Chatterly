@@ -1,7 +1,7 @@
 import 'package:chatterly/FrontEnd/HomePage/HomePage.dart';
 import 'package:chatterly/FrontEnd/LoginSignup/Signup.dart';
 import 'package:flutter/material.dart';
-
+import 'package:shared_preferences/shared_preferences.dart';
 import '../LoginSignup/Login.dart';
 
 
@@ -15,23 +15,43 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   late Animation<double> _animation;
 
   @override
+  @override
   void initState() {
     super.initState();
+
     _controller = AnimationController(
       vsync: this,
-      duration: Duration(seconds: 2),
+      duration: const Duration(seconds: 2),
     );
-    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
-    _controller.forward();
 
-    // Navigate to login page after 3 seconds
-    Future.delayed(Duration(seconds: 3), () {
+    _animation = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeInOut,
+    );
+
+    _controller.forward();
+    _navigateUser();
+  }
+
+  Future<void> _navigateUser() async {
+    await Future.delayed(const Duration(seconds: 3));
+
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString("token");
+
+    if (!mounted) return;
+
+    if (token != null && token.isNotEmpty) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (context) => LoginPage()),
-        // MaterialPageRoute(builder: (context) => HomePage()),
+        MaterialPageRoute(builder: (_) => const HomePage()),
       );
-    });
+    } else {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const LoginPage()),
+      );
+    }
   }
 
   @override
