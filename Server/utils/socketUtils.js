@@ -297,7 +297,7 @@ export const initSocket = (io) => {
           }
 
           // ✅ Validate SDP offer format
-          if (!validateSDP(offer.sdp)) {
+          if (!validateSDP(offer?.sdp || offer)) {
             return socket.emit("call:error", { message: "Invalid SDP offer format" });
           }
 

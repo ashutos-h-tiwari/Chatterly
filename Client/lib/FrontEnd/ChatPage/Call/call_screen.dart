@@ -34,10 +34,26 @@ class _CallScreenState extends State<CallScreen> {
   final RTCVideoRenderer _localRenderer  = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
+  // final Map<String, dynamic> _iceConfig = {
+  //   'iceServers': [
+  //     {'urls': 'stun:stun.l.google.com:19302'},
+  //     {'urls': 'stun:stun1.l.google.com:19302'},
+  //   ],
+  //   'sdpSemantics': 'unified-plan',
+  // };
   final Map<String, dynamic> _iceConfig = {
     'iceServers': [
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
+      {
+        'urls': [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp',
+        ],
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
     ],
     'sdpSemantics': 'unified-plan',
   };
@@ -56,12 +72,10 @@ class _CallScreenState extends State<CallScreen> {
   StreamSubscription? _subBusy;
   StreamSubscription? _subOffline;
   StreamSubscription? _subError;
-  StreamSubscription? _subIncoming; // ✅ to catch offer from call-user event
+  StreamSubscription? _subIncoming;
 
   final List<RTCIceCandidate> _iceCandidateQueue = [];
   bool _remoteDescSet = false;
-
-  // ✅ Flag: are we waiting for offer (notifyOnly case)
   bool _waitingForOffer = false;
 
   @override
@@ -73,9 +87,9 @@ class _CallScreenState extends State<CallScreen> {
   Future<void> _init() async {
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
+    _listenSocketEvents(); // ✅ Listen FIRST before any async work
     await _createPeerConnection();
     await _getLocalStream();
-    _listenSocketEvents();
 
     if (widget.isCaller) {
       await _startCallAsCaller();
@@ -87,6 +101,7 @@ class _CallScreenState extends State<CallScreen> {
   Future<void> _createPeerConnection() async {
     _pc = await createPeerConnection(_iceConfig);
 
+    // Send ICE candidates to remote
     _pc!.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
       widget.socket.emitIceCandidate(
@@ -98,25 +113,48 @@ class _CallScreenState extends State<CallScreen> {
           'sdpMLineIndex': candidate.sdpMLineIndex,
         },
       );
+      print('🧊 Sent ICE candidate to remote');
     };
 
+    // Remote stream arrived
     _pc!.onTrack = (event) {
+      print('🎵 Remote track received: ${event.track.kind}');
       if (event.streams.isNotEmpty && mounted) {
-        setState(() => _remoteRenderer.srcObject = event.streams[0]);
+        setState(() {
+          _remoteRenderer.srcObject = event.streams[0];
+          // ✅ Mark connected when remote track arrives (more reliable than connectionState)
+          if (!_isConnected) {
+            _isConnected = true;
+            _startTimer();
+          }
+        });
       }
     };
 
-    _pc!.onConnectionState = (state) {
-      print('🔗 PeerConnection state: $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        if (mounted) setState(() => _isConnected = true);
-        _startTimer();
+    // ✅ Use onIceConnectionState — more reliable than onConnectionState
+    _pc!.onIceConnectionState = (state) {
+      print('🧊 ICE Connection state: $state');
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        if (mounted && !_isConnected) {
+          setState(() => _isConnected = true);
+          _startTimer();
+        }
       }
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        // ✅ Only end if we were actually connected — not while waiting for offer
+      if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
         if (!_waitingForOffer) {
-          _endCall(reason: 'connection-failed');
+          _endCall(reason: 'ice-failed');
+        }
+      }
+    };
+
+    // Backup: also watch connectionState
+    _pc!.onConnectionState = (state) {
+      print('🔗 Connection state: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        if (mounted && !_isConnected) {
+          setState(() => _isConnected = true);
+          _startTimer();
         }
       }
     };
@@ -125,18 +163,26 @@ class _CallScreenState extends State<CallScreen> {
   Future<void> _getLocalStream() async {
     try {
       _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+        },
         'video': widget.video ? {'facingMode': 'user'} : false,
       });
 
+      print('🎤 Local stream obtained — tracks: ${_localStream!.getTracks().length}');
+
       if (widget.video) _localRenderer.srcObject = _localStream;
 
+      // Add all tracks to peer connection
       for (final track in _localStream!.getTracks()) {
         await _pc!.addTrack(track, _localStream!);
+        print('➕ Added track: ${track.kind}');
       }
     } catch (e) {
       print('❌ getLocalStream error: $e');
-      _showSnack('Could not access microphone/camera');
+      _showSnack('Could not access microphone/camera: $e');
     }
   }
 
@@ -144,18 +190,23 @@ class _CallScreenState extends State<CallScreen> {
   // CALLER SIDE
   // ══════════════════════════════════════════════════════════════════════════
   Future<void> _startCallAsCaller() async {
-    final offer = await _pc!.createOffer({
-      'offerToReceiveAudio': true,
-      'offerToReceiveVideo': widget.video,
-    });
-    await _pc!.setLocalDescription(offer);
+    try {
+      final offer = await _pc!.createOffer({
+        'offerToReceiveAudio': true,
+        'offerToReceiveVideo': widget.video,
+      });
+      await _pc!.setLocalDescription(offer);
+      print('📋 Local description (offer) set');
 
-    widget.socket.emitCallUser(
-      to: widget.remoteUserId,
-      conversationId: widget.conversationId,
-      offer: {'sdp': offer.sdp, 'type': offer.type},
-    );
-    print('📡 Offer sent to ${widget.remoteUserId}');
+      widget.socket.emitCallUser(
+        to: widget.remoteUserId,
+        conversationId: widget.conversationId,
+        offer: {'sdp': offer.sdp, 'type': offer.type},
+      );
+      print('📡 Offer sent to ${widget.remoteUserId}');
+    } catch (e) {
+      print('❌ _startCallAsCaller error: $e');
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -163,50 +214,60 @@ class _CallScreenState extends State<CallScreen> {
   // ══════════════════════════════════════════════════════════════════════════
   Future<void> _startCallAsCallee() async {
     final offer = widget.initialOffer;
+    final hasRealOffer = offer != null &&
+        offer['sdp'] != null &&
+        offer['sdp'].toString().trim().isNotEmpty &&
+        offer['sdp'].toString().contains('v=0');
 
-    // ✅ KEY FIX: Check if offer has actual SDP
-    // If notifyOnly=true, offer will be null or empty — just wait
-    if (offer != null && offer['sdp'] != null && offer['sdp'].toString().isNotEmpty) {
-      print('📨 Offer already available — handling immediately');
+    if (hasRealOffer) {
+      print('📨 Real offer in initialOffer — handling immediately');
       await _handleOffer(offer);
     } else {
-      // ✅ notifyOnly case — wait for actual offer via call-user socket event
-      print('⏳ No offer yet (notifyOnly) — waiting for call-user event...');
+      print('⏳ notifyOnly — waiting for real offer via call-user event');
       _waitingForOffer = true;
-      if (mounted) setState(() {}); // show "Connecting..." UI
+      if (mounted) setState(() {});
     }
   }
 
   Future<void> _handleOffer(dynamic offerData) async {
     try {
-      _waitingForOffer = false;
+      if (_remoteDescSet) {
+        print('⚠️ Remote desc already set — skipping duplicate offer');
+        return;
+      }
 
-      final sdp  = offerData['sdp']?.toString()  ?? '';
+      final sdp  = offerData['sdp']?.toString().trim() ?? '';
       final type = offerData['type']?.toString() ?? 'offer';
 
-      if (sdp.isEmpty) {
-        print('⚠️ SDP is empty — still waiting');
+      if (sdp.isEmpty || !sdp.contains('v=0')) {
+        print('⚠️ Invalid SDP — waiting');
         _waitingForOffer = true;
         return;
       }
 
-      print('📨 Setting remote description (offer)...');
+      print('📨 Setting remote description...');
       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
       _remoteDescSet = true;
+      _waitingForOffer = false;
 
       // Flush queued ICE candidates
-      print('🧊 Flushing ${_iceCandidateQueue.length} queued ICE candidates');
+      print('🧊 Flushing ${_iceCandidateQueue.length} queued candidates');
       for (final c in _iceCandidateQueue) {
-        await _pc!.addCandidate(c);
+        try {
+          await _pc!.addCandidate(c);
+        } catch (e) {
+          print('⚠️ addCandidate error: $e');
+        }
       }
       _iceCandidateQueue.clear();
 
-      // Create and send answer
+      // Create answer
       final answer = await _pc!.createAnswer({
         'offerToReceiveAudio': true,
         'offerToReceiveVideo': widget.video,
       });
       await _pc!.setLocalDescription(answer);
+      print('📋 Local description (answer) set');
 
       widget.socket.emitAnswer(
         to: widget.remoteUserId,
@@ -220,76 +281,92 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // SOCKET LISTENERS
+  // SOCKET LISTENERS — registered FIRST before peer connection
   // ══════════════════════════════════════════════════════════════════════════
   void _listenSocketEvents() {
 
-    // ✅ KEY FIX: Callee listens for the ACTUAL offer from call-user event
-    // This fires after call-initiate (notifyOnly) when caller sends real offer
+    // ✅ Callee: real offer arrives via call-user (emitted as incoming-call)
     _subIncoming = widget.socket.onIncomingCall.listen((data) async {
-      if (!widget.isCaller) {
-        final offer = data['offer'];
-        final isNotifyOnly = data['notifyOnly'] == true;
+      if (widget.isCaller) return; // Caller doesn't need this
 
-        if (!isNotifyOnly && offer != null) {
-          // This is the real offer from call-user event
-          print('📨 Received actual offer via incoming-call (call-user)');
-          await _handleOffer(offer);
-        }
+      final offer = data['offer'];
+      final isNotifyOnly = data['notifyOnly'] == true;
+
+      print('📲 onIncomingCall in CallScreen — notifyOnly: $isNotifyOnly, hasOffer: ${offer != null}');
+
+      if (!isNotifyOnly && offer != null) {
+        print('📨 Real offer received via socket — handling');
+        await _handleOffer(offer);
       }
     });
 
-    // CALLER: receives answer from callee
+    // ✅ Caller: callee's answer arrives
     _subAnswered = widget.socket.onCallAnswered.listen((data) async {
+      if (!widget.isCaller) return; // Only caller needs this
+
       try {
         final answer = data['answer'];
-        if (answer == null) return;
-        final sdp  = answer['sdp']?.toString()  ?? '';
-        final type = answer['type']?.toString() ?? 'answer';
-        if (sdp.isEmpty) return;
+        if (answer == null) {
+          print('⚠️ No answer in call-answered event');
+          return;
+        }
 
-        print('✅ Received answer — setting remote description');
+        final sdp  = answer['sdp']?.toString().trim() ?? '';
+        final type = answer['type']?.toString() ?? 'answer';
+
+        if (sdp.isEmpty) {
+          print('⚠️ Empty SDP in answer');
+          return;
+        }
+
+        print('✅ Setting remote answer...');
         await _pc!.setRemoteDescription(RTCSessionDescription(sdp, type));
         _remoteDescSet = true;
 
         // Flush queued ICE candidates
+        print('🧊 Flushing ${_iceCandidateQueue.length} queued candidates after answer');
         for (final c in _iceCandidateQueue) {
-          await _pc!.addCandidate(c);
+          try {
+            await _pc!.addCandidate(c);
+          } catch (e) {
+            print('⚠️ addCandidate error: $e');
+          }
         }
         _iceCandidateQueue.clear();
-
-        print('✅ Remote answer set successfully');
+        print('✅ Remote answer set — WebRTC negotiation complete');
       } catch (e) {
         print('❌ onCallAnswered error: $e');
       }
     });
 
-    // BOTH: ICE candidates — queue if remote desc not set yet
+    // ICE candidates from remote peer
     _subIce = widget.socket.onIceCandidate.listen((data) async {
       try {
         final c = data['candidate'];
         if (c == null) return;
 
+        final candidateStr = c['candidate']?.toString() ?? '';
+        if (candidateStr.isEmpty) return;
+
         final candidate = RTCIceCandidate(
-          c['candidate']?.toString() ?? '',
+          candidateStr,
           c['sdpMid']?.toString(),
           c['sdpMLineIndex'] as int? ?? 0,
         );
 
-        if (_remoteDescSet) {
+        if (_remoteDescSet && _pc != null) {
           await _pc!.addCandidate(candidate);
-          print('🧊 ICE candidate added directly');
+          print('🧊 ICE candidate added');
         } else {
-          // ✅ Queue until remote description is ready
           _iceCandidateQueue.add(candidate);
-          print('🧊 ICE candidate queued (${_iceCandidateQueue.length} total)');
+          print('🧊 ICE candidate queued (${_iceCandidateQueue.length})');
         }
       } catch (e) {
         print('❌ ice-candidate error: $e');
       }
     });
 
-    // Call ended by remote
+    // Remote ended call
     _subEnded = widget.socket.onCallEnded.listen((data) {
       print('📴 Remote ended call — reason: ${data['reason']}');
       _endCall(reason: 'remote-ended', navigate: true);
@@ -301,13 +378,13 @@ class _CallScreenState extends State<CallScreen> {
       _endCall(reason: 'declined', navigate: true);
     });
 
-    // Callee busy
+    // Busy
     _subBusy = widget.socket.onCallBusy.listen((data) {
       _showSnack('User is busy');
       _endCall(reason: 'busy', navigate: true);
     });
 
-    // Callee offline
+    // Offline
     _subOffline = widget.socket.onCalleeOffline.listen((data) {
       _showSnack('User is offline');
       _endCall(reason: 'offline', navigate: true);
@@ -324,13 +401,17 @@ class _CallScreenState extends State<CallScreen> {
   // CONTROLS
   // ══════════════════════════════════════════════════════════════════════════
   void _toggleMute() {
-    _localStream?.getAudioTracks().forEach((t) => t.enabled = _isMuted);
+    _localStream?.getAudioTracks().forEach((t) {
+      t.enabled = _isMuted; // toggle: if muted, enable; if enabled, mute
+    });
     setState(() => _isMuted = !_isMuted);
+    print('🎤 Mute: $_isMuted');
   }
 
   void _toggleSpeaker() {
     setState(() => _isSpeakerOn = !_isSpeakerOn);
     Helper.setSpeakerphoneOn(_isSpeakerOn);
+    print('🔊 Speaker: $_isSpeakerOn');
   }
 
   void _hangUp() {
@@ -344,15 +425,18 @@ class _CallScreenState extends State<CallScreen> {
   void _endCall({String reason = '', bool navigate = false}) {
     if (_isEnded) return;
     _isEnded = true;
+    print('📴 Ending call — reason: $reason');
     _timer?.cancel();
     _cleanup();
     if (navigate && mounted) Navigator.of(context).pop();
   }
 
   void _startTimer() {
+    if (_timer != null) return; // Already started
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _seconds++);
     });
+    print('⏱️ Call timer started');
   }
 
   String _formatDuration(int s) {
@@ -409,6 +493,7 @@ class _CallScreenState extends State<CallScreen> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
+        // Top: caller info
         Padding(
           padding: const EdgeInsets.only(top: 60),
           child: Column(
@@ -443,6 +528,8 @@ class _CallScreenState extends State<CallScreen> {
             ],
           ),
         ),
+
+        // Middle: controls
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
@@ -460,6 +547,8 @@ class _CallScreenState extends State<CallScreen> {
             ),
           ],
         ),
+
+        // Bottom: end call
         Padding(
           padding: const EdgeInsets.only(bottom: 60),
           child: Column(
@@ -495,12 +584,14 @@ class _CallScreenState extends State<CallScreen> {
   Widget _buildVideoCallUI() {
     return Stack(
       children: [
+        // Remote video fullscreen
         Positioned.fill(
           child: RTCVideoView(
             _remoteRenderer,
             objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
           ),
         ),
+        // Local video pip
         Positioned(
           top: 20,
           right: 16,
@@ -515,12 +606,14 @@ class _CallScreenState extends State<CallScreen> {
             ),
           ),
         ),
+        // Status
         Positioned(
           top: 20,
           left: 0,
           right: 130,
           child: Center(child: _buildStatusText()),
         ),
+        // Controls
         Positioned(
           bottom: 40,
           left: 0,
@@ -568,7 +661,9 @@ class _CallScreenState extends State<CallScreen> {
     if (_waitingForOffer) {
       return const _PulsingText(text: 'Ringing...');
     }
-    return _PulsingText(text: widget.isCaller ? 'Calling...' : 'Connecting...');
+    return _PulsingText(
+      text: widget.isCaller ? 'Calling...' : 'Connecting...',
+    );
   }
 
   Widget _controlBtn({
@@ -596,6 +691,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 }
 
+// ─── Pulsing text widget ──────────────────────────────────────────────────────
 class _PulsingText extends StatefulWidget {
   final String text;
   const _PulsingText({required this.text});
