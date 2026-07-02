@@ -305,7 +305,7 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
 
   @override
   Widget build(BuildContext context) {
-    final accent = const Color(0xFFBFA2FF);
+    final accent = const Color(0xFFAF1E33);
 
     return Scaffold(
       body: Container(
@@ -314,8 +314,8 @@ class _ThreadsPageState extends State<ThreadsPage> with TickerProviderStateMixin
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
-              Color(0xFF120A2A),
-              Color(0xFF311B6B),
+              Color(0xFF560000),
+              Color(0xFFB90303),
               Color(0xFFBFA2FF),
             ],
           ),
@@ -737,8 +737,8 @@ class _CompactThreadTileState extends State<_CompactThreadTile> {
                       boxShadow: [
                         BoxShadow(
                           color: widget.thread.online
-                              ? const Color(0xFFBFA2FF).withOpacity(0.9)
-                              : const Color(0xFFBFA2FF).withOpacity(0.35),
+                              ? const Color(0xFFAB183F).withOpacity(0.9)
+                              : const Color(0xFFAF1E33).withOpacity(0.35),
                           blurRadius: widget.thread.online ? 16 : 6,
                           spreadRadius: widget.thread.online ? 2 : 0,
                         )

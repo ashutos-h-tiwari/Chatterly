@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:chatterly/FrontEnd/ChatPage/services/e2e/e2e_service.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -208,7 +209,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   }
 
   @override
-  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _roomId != null) {
       try {
@@ -248,6 +248,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       }
 
       _api = ChatApi(_token!);
+      await E2EService.initAndUpload(_token!);
       _socketSvc = ChatSocket(baseUrl: _base, token: _token!);
 
       // init call socket
@@ -389,8 +390,29 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   Future<void> _loadMessages({String? before}) async {
     if (_roomId == null) return;
-    if (_loadingMore) return;
-    final msgs = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
+    if (before != null && _loadingMore) return; // only guard pagination, not initial load
+
+    final raw = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
+
+    // ── E2EE: build session once, then decrypt every encrypted history msg ──
+    if (_token != null) {
+      try { await E2EService.buildSession(widget.chatUserId, _token!); } catch (_) {}
+    }
+    final msgs = await Future.wait(raw.map((msg) async {
+      final cipher = msg.cipherText;
+      final contentType = msg.contentType ?? 'signal:whisper';
+      if (cipher != null && cipher.isNotEmpty && msg.senderId != _myUserId) {
+        try {
+          final plain = await E2EService.decrypt(widget.chatUserId, cipher, contentType);
+          return msg.copyWith(text: plain);
+        } catch (_) {
+          return msg.copyWith(text: '[Could not decrypt]');
+        }
+      }
+      return msg;
+    }));
+
+    if (!mounted) return;
     setState(() {
       if (before == null) {
         _messages..clear()..addAll(msgs);
@@ -413,9 +435,49 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     }
   }
 
+  // Retry sending a failed message (re-encrypt + POST)
+  Future<void> _retrySend(ChatMessage m) async {
+    // Only retry messages that were originally sent by me and have text
+    if (!m.isSentByMe || (m.text ?? '').isEmpty || _roomId == null) return;
+
+    final idx = _messages.indexWhere((x) => x.id == m.id);
+    if (idx == -1) return;
+
+    // mark as sending
+    if (mounted) setState(() => _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sending));
+    _persistCache();
+
+    try {
+      await E2EService.buildSession(widget.chatUserId, _token!);
+      final encrypted = await E2EService.encrypt(widget.chatUserId, m.text);
+
+      final saved = await _api.sendText(
+        _roomId!,
+        text: m.text,
+        cipherText: encrypted['cipherText']!,
+        contentType: encrypted['contentType']!,
+        clientId: m.id,
+        recipientUserId: widget.chatUserId,
+        replyTo: m.replyTo?.id,
+        myUserId: _myUserId,
+      );
+
+      if (!mounted) return;
+      final fixedTs = resolveSendTimestamp(saved.timestamp, _messages[idx].timestamp);
+      setState(() => _messages[idx] = _messages[idx].copyWith(id: saved.id, status: MessageStatus.sent, timestamp: fixedTs));
+      _persistCache();
+    } catch (e, st) {
+      debugPrint('Retry send failed: $e\n$st');
+      if (mounted) setState(() => _messages[idx] = _messages[idx].copyWith(status: MessageStatus.failed));
+      _persistCache();
+      _snack('Retry failed: ${e.toString().split('\n').first}');
+    }
+  }
+
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 100) {
+    // Load older messages when user scrolls near the TOP of the list
+    if (_scroll.position.pixels <= _scroll.position.minScrollExtent + 100) {
       _loadMore();
     }
   }
@@ -485,10 +547,18 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     _socketSvc.emitTypingStop(_roomId);
 
     try {
+      // ── E2EE: ensure session exists, then encrypt ──────────────────────
+      await E2EService.buildSession(widget.chatUserId, _token!);
+      final encrypted = await E2EService.encrypt(widget.chatUserId, text);
+      // encrypted = { 'cipherText': base64, 'contentType': 'signal:prekey'|'signal:whisper' }
+
       final saved = await _api.sendText(
         _roomId!,
-        text: text,
+        text: text,                          // kept for UI / cache only
+        cipherText: encrypted['cipherText']!, // actual payload sent to server
+        contentType: encrypted['contentType']!,
         clientId: tempId,
+        recipientUserId: widget.chatUserId,
         replyTo: pending.replyTo?.id,
         myUserId: _myUserId,
       );
@@ -503,9 +573,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         ));
         _persistCache();
       }
-    } catch (e) {
-      debugPrint('Send failed: $e');
-      _snack('Send failed');
+    } catch (e, st) {
+      debugPrint('Send failed: $e\n$st');
+
+      // Try to extract a readable message from the error
+      String errMsg = e.toString();
+      // If it's an HTTP error containing response body, show a concise snippet
+      if (errMsg.length > 200) errMsg = errMsg.substring(0, 200) + '...';
+
+      // mark pending message as failed so UI shows retry affordance
+      final iFail = _messages.indexWhere((m) => m.id == tempId);
+      if (iFail != -1 && mounted) {
+        setState(() => _messages[iFail] = _messages[iFail].copyWith(status: MessageStatus.failed));
+        _persistCache();
+      }
+
+      _snack('Send failed: $errMsg');
     }
   }
 
@@ -796,7 +879,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       _scroll.animateTo(
-        0,
+        _scroll.position.maxScrollExtent,
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeOut,
       );
@@ -1236,6 +1319,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             ),
           )
               : MessageList(
+            scrollController: _scroll,
             messages: _messages,
             onTap: (m) {
               if (_isImageMessage(m)) {
@@ -1247,6 +1331,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             onSave: _saveAttachment,
             onLongPress: _onMessageLongPress,
             onPlay: _playOrPauseAudioForMessage,
+            onRetry: _retrySend,
             isAudioMessage: _isAudioMessage,
             maxBubbleWidth: maxBubbleWidth,
             playingMessageId: _playingMessageId,
@@ -1518,3 +1603,4 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     );
   }
 }
+

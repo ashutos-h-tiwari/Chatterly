@@ -1,1 +1,1 @@
-enum MessageStatus { sending, sent, delivered, read }
+enum MessageStatus { sending, sent, delivered, read, failed }

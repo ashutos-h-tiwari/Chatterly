@@ -4,20 +4,23 @@ import Conversation from "../models/Conversation.js";
 export const createMessageAndBroadcast = async (io, payload) => {
   console.log("🧩 Received payload:", payload);
 
-  const { conversationId, senderId, text, attachments } = payload;
-
+// AFTER:
+const { conversationId, senderId, cipherText, contentType, text, clientId, attachments } = payload;
   if (!conversationId) {
     console.error("❌ Missing conversationId in payload");
     return;
   }
 
   // ✅ Use conversationId if that’s your schema field
-  const message = new Message({
-    conversationId,
-    sender: senderId,
-    text: text || "",
-    attachments: attachments || []
-  });
+const message = new Message({
+  conversationId,
+  sender:      senderId,
+  cipherText:  cipherText  || null,
+  contentType: cipherText ? (contentType || "signal:whisper") : "legacy:plaintext",
+  text:        cipherText ? undefined : (text || ""),
+  clientId:    clientId   || null,
+  attachments: attachments || [],
+});
 
   await message.save();
 
@@ -33,8 +36,7 @@ export const createMessageAndBroadcast = async (io, payload) => {
     (await Message.findById(message._id).populate("sender", "name email avatar"));
 
   // emit to conversation room
-  io.to(conversationId).emit("message:receive", populated);
-
+  io.to(conversationId).emit("message:new", broadcastPayload);
   // emit to each participant personal room
   const conv = await Conversation.findById(conversationId).populate("participants", "_id");
   for (const p of conv.participants) {
