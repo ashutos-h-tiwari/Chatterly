@@ -30,6 +30,8 @@ class RecorderController {
   }
 
   Future<void> cancel() async {
-    try { if (_recorder.isRecording) await _recorder.stopRecorder(); } catch (_) {}
+    try {
+      if (_recorder.isRecording) await _recorder.stopRecorder();
+    } catch (_) {}
   }
 }

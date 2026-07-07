@@ -2,7 +2,9 @@
 import Conversation from "../models/Conversation.js";
 import Message from "../models/Message.js";
 import { emitMessageToRoom } from "../utils/socketUtils.js";
-
+// Add this import at the top of chatController.js
+import User from "../models/User.js";
+import { sendPushNotification } from "../utils/sendNotification.js";
 /**
  * Create or Get a 1-1 Conversation (atomic, race-safe via pairKey)
  */
@@ -172,7 +174,29 @@ export const sendMessage = async (req, res) => {
 
     // Realtime broadcast
     emitMessageToRoom(conversationId, payload);
-
+// Send push notification to the other participant
+try {
+  const receiverId = conv.participants.find(
+    (p) => p.toString() !== req.user._id.toString()
+  );
+  if (receiverId) {
+    const receiver = await User.findById(receiverId).select("fcmToken name");
+    if (receiver?.fcmToken) {
+      await sendPushNotification({
+        fcmToken: receiver.fcmToken,
+        title: `New message from ${req.user.name}`,
+        body: doc.cipherText ? "🔒 Encrypted message" : doc.text || "Sent an attachment",
+        data: {
+          type: "message",
+          senderId: req.user._id.toString(),
+          conversationId: conversationId.toString(),
+        },
+      });
+    }
+  }
+} catch (notifErr) {
+  console.error("⚠️ Notification error (non-fatal):", notifErr.message);
+}
     return res.status(201).json({
       success: true,
       message: "Message sent successfully",

@@ -7,9 +7,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../ChatPage/services/fcm_services.dart';
 import 'Signup.dart';
 import '../HomePage/HomePage.dart';
-import 'package:flutter/foundation.dart'; // <--- ADJUSTMENT: Added for kDebugMode
+import 'package:flutter/foundation.dart';
+// <--- ADJUSTMENT: Added for kDebugMode
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -140,7 +142,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
         } else {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString("token", token);
-
+          await FcmService.init();
           final myId = _extractUserIdFromJwt(token);
           if (myId != null && myId.isNotEmpty) {
             await prefs.setString("userId", myId);

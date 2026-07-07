@@ -54,7 +54,10 @@ dependencies:
   flutter_webrtc:
   uuid:
   provider:
-
+  firebase_messaging:
+  flutter_local_notifications:
+  # cryptography: ^2.7.0
+  asn1lib:
   #  agora_rtc_engine:
 
 

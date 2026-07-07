@@ -20,7 +20,11 @@
     "multer-storage-cloudinary": "^4.0.0",
     "socket.io": "^4.8.0",
     "socket.io-client": "^4.8.1",
+<<<<<<< HEAD
     "tweetnacl": "^1.0.3"
+=======
+    "firebase-admin": "^12.0.0"
+>>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
   },
   "devDependencies": {
     "nodemon": "^2.0.22"

@@ -17,7 +17,7 @@ import keyRoutes from "./routes/keyRoutes.js"; // optional, ensure file exists
 import { apiLimiter } from "./middlewares/rateLimiter.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import { initSocket } from "./utils/socketUtils.js";
-
+import notificationRoutes from "./routes/notificationRoutes.js";
 dotenv.config();
 
 // --- ES module __dirname fix ---
@@ -77,7 +77,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/status", statusRoutes); // ✅ NEW: Status routes
-
+app.use("/api/notifications", notificationRoutes);//notification route..edit ayush
 // Optional keys route (E2EE key handling)
 try {
   if (keyRoutes) {

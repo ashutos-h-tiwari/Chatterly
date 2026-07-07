@@ -2,10 +2,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:dio/dio.dart' as dio;
 import 'package:http_parser/http_parser.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 
 import '../models/chat_message.dart';
 import '../utils/json_utils.dart';
+import 'e2e/e2e_service.dart';
 
 class ChatApi {
   ChatApi(this.token);
@@ -89,6 +90,7 @@ class ChatApi {
     throw Exception('Load messages failed: ${res.statusCode}');
   }
 
+<<<<<<< HEAD
   Future<ChatMessage> sendText(
     String roomId, {
     String? text,
@@ -119,6 +121,27 @@ class ChatApi {
     }
     throw Exception('Send text failed: ${resp.statusCode}');
   }
+=======
+  // Future<ChatMessage> sendText(String roomId,
+  //     {required String text, required String clientId, String? replyTo, String? myUserId}) async {
+  //   final resp = await http.post(
+  //     Uri.parse(_convSend(roomId)),
+  //     headers: _headersJson,
+  //     body: jsonEncode({
+  //       'text': text,
+  //       'clientId': clientId,
+  //       if (replyTo != null) 'replyTo': replyTo,
+  //     }),
+  //   );
+  //
+  //   if (resp.statusCode >= 200 && resp.statusCode < 300) {
+  //     final raw = jsonDecode(resp.body);
+  //     final obj = (raw is Map && raw['data'] is Map) ? raw['data'] : raw;
+  //     return ChatMessage.fromJson(asStringKeyMap(obj), myUserId: myUserId);
+  //   }
+  //   throw Exception('Send text failed: ${resp.statusCode}');
+  // }
+>>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
 
   Future<ChatMessage> sendAttachment(
     String roomId, {
@@ -200,5 +223,75 @@ class ChatApi {
       return body.map((k, v) => MapEntry(k.toString(), v));
     }
     throw const FormatException('Unexpected conversation response');
+  }
+  //e2e logic before sending
+  // Add to ChatApi class:
+
+  // /// Call this right after login — uploads your public key to the server.
+  // Future<void> uploadPublicKey(String userId, String publicKeyB64) async {
+  //   await http.post(
+  //     Uri.parse('$_base/api/keys/upload'),
+  //     headers: _headersJson,
+  //     body: jsonEncode({'userId': userId, 'publicKey': publicKeyB64}),
+  //   );
+  // }
+
+  // /// Fetch a peer's public key so you can encrypt for them.
+  // Future<String> fetchPublicKey(String userId) async {
+  //   final res = await http.get(
+  //     Uri.parse('$_base/api/keys/$userId'),
+  //     headers: _headersJsonAccept,
+  //   );
+  //   if (res.statusCode == 200) {
+  //     final body = jsonDecode(res.body);
+  //     return body['publicKey'] as String;
+  //   }
+  //   throw Exception('Failed to fetch public key for $userId');
+  // }
+
+// MODIFY sendText — encrypt before sending:
+  Future<ChatMessage> sendText(
+      String roomId, {
+        required String text,        // plaintext (used locally only, not sent)
+        required String cipherText,  // Signal-encrypted base64 payload
+        required String contentType, // 'signal:prekey' or 'signal:whisper'
+        String? clientId,
+        String? recipientUserId,
+        String? replyTo,
+        String? myUserId,
+      }) async {
+    final body = {
+      'cipherText':  cipherText,
+      'contentType': contentType,
+      if (clientId  != null) 'clientId':  clientId,
+      if (replyTo   != null) 'replyTo':   replyTo,
+    };
+
+    final res = await http.post(
+      Uri.parse(_convSend(roomId)),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(body),
+    );
+
+    // Debug: log request/response to help diagnose send failures
+    try {
+      debugPrint('ChatApi.sendText -> POST ${_convSend(roomId)}');
+      debugPrint('Request body: ${jsonEncode(body)}');
+      debugPrint('Response code: ${res.statusCode}');
+      debugPrint('Response body: ${res.body}');
+    } catch (_) {}
+
+    if (res.statusCode != 200 && res.statusCode != 201) {
+      throw Exception('sendText failed: ${res.statusCode} ${res.body}');
+    }
+
+    final json = asStringKeyMap(jsonDecode(res.body) as Map);
+    // Server echoes back the saved message; use plaintext for local display
+    final saved = ChatMessage.fromJson(json, myUserId: myUserId);
+    // If server doesn't echo plaintext, patch it in from our local copy
+    return saved.text.isEmpty ? saved.copyWith(text: text) : saved;
   }
 }

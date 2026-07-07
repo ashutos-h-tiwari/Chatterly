@@ -15,6 +15,7 @@ class MessageBubble extends StatelessWidget {
   final double uploadProgress;
   final VoidCallback? onPlay;
   final VoidCallback? onSave; // NEW: callback to save/download attachment
+  final VoidCallback? onRetry; // NEW: callback to retry failed send
   final void Function(ChatMessage) onLongPress;
 
   const MessageBubble({
@@ -28,6 +29,7 @@ class MessageBubble extends StatelessWidget {
     required this.uploadProgress,
     this.onPlay,
     this.onSave,
+    this.onRetry,
   });
 
   @override
@@ -121,6 +123,13 @@ class MessageBubble extends StatelessWidget {
                 if (message.isSentByMe) ...[
                   const SizedBox(width: 4),
                   _statusIcon(message.status),
+                  if (message.status == MessageStatus.failed && onRetry != null) ...[
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: onRetry,
+                      child: const Icon(Icons.refresh, size: 16, color: Colors.redAccent),
+                    ),
+                  ],
                 ],
                 if (message.reaction != null && message.reaction!.isNotEmpty) ...[
                   const SizedBox(width: 6),
@@ -301,6 +310,8 @@ class MessageBubble extends StatelessWidget {
         return const Icon(Icons.done_all, size: 16, color: Colors.grey);
       case MessageStatus.read:
         return const Icon(Icons.done_all, size: 16, color: Colors.blue);
+      case MessageStatus.failed:
+        return const Icon(Icons.error_outline, size: 16, color: Colors.redAccent);
     }
   }
 

@@ -23,6 +23,7 @@ class MessageList extends StatelessWidget {
   final void Function(ChatMessage) onSave;
   final void Function(ChatMessage) onLongPress;
   final void Function(ChatMessage) onPlay;
+  final void Function(ChatMessage)? onRetry;
 
   /// predicate which returns true if a message should be treated as audio
   final bool Function(ChatMessage) isAudioMessage;
@@ -36,6 +37,9 @@ class MessageList extends StatelessWidget {
   final Duration audioDuration;
   final Duration audioPosition;
 
+  // Use the scrollController passed by parent so ChatPage's _scroll is attached
+  final ScrollController scrollController;
+
   const MessageList({
     Key? key,
     required this.messages,
@@ -43,18 +47,20 @@ class MessageList extends StatelessWidget {
     required this.onSave,
     required this.onLongPress,
     required this.onPlay,
+    this.onRetry,
     required this.isAudioMessage,
     required this.maxBubbleWidth,
     required this.playingMessageId,
     required this.audioDuration,
     required this.audioPosition,
+    required this.scrollController,
   }) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     // Reverse: newest messages at bottom (ListView scrolls from bottom)
     return ListView.builder(
-      controller: ScrollController(),
+      controller: scrollController,
       reverse: true,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
       itemCount: messages.length,
@@ -92,7 +98,9 @@ class MessageList extends StatelessWidget {
               child: MessageBubble(
                 message: msg,
                 maxBubbleWidth: maxBubbleWidth,
-                // onLongPress: () => onLongPress(msg),
+                // forward long-press handler to the bubble so its internal detector uses the same callback
+                onLongPress: onLongPress,
+                onRetry: onRetry == null ? null : () => onRetry!(msg),
                 onSave: () => onSave(msg),
 
                 // audio-related props
@@ -100,7 +108,7 @@ class MessageList extends StatelessWidget {
                 isPlaying: playingMessageId == msg.id,
                 onPlay: () => onPlay(msg),
                 playbackProgress: playbackProgress,
-                uploadProgress: msg.uploadProgress ?? 0.0, onLongPress: (ChatMessage p1) {  },
+                uploadProgress: msg.uploadProgress ?? 0.0,
               ),
             ),
           ),

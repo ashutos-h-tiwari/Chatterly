@@ -1,4 +1,11 @@
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+
+import '../utils/json_utils.dart';
+import 'e2e/e2e_service.dart';
 
 typedef VoidData = void Function(dynamic data);
 
@@ -67,8 +74,56 @@ class ChatSocket {
     _socket!.on('reconnect', (_) => join());
 
     if (onIncoming != null) {
-      _socket!.on('message:new', onIncoming);
-      _socket!.on('message', onIncoming);
+      // _socket!.on('message:new', (data) async {
+      //   try {
+      //     final map = data as Map;
+      //     if (map['isEncrypted'] == true) {
+      //       final senderPubKey = await _fetchPubKey(map['senderId']); // see below
+      //       final plain = await E2EService.decrypt(map['text'], senderPubKey);
+      //       onIncoming({...map, 'text': plain});
+      //     } else {
+      //       onIncoming(data);
+      //     }
+      //   } catch (_) {
+      //     onIncoming(data); // fallback
+      //   }
+      // });
+      _socket!.on('message:new', (data) async {
+        try {
+          final map = asStringKeyMap(data as Map);
+          final cipherText = map['cipherText']?.toString();
+          final contentType = map['contentType']?.toString() ?? 'signal:whisper';
+          final senderId = (map['sender'] is Map)
+              ? (map['sender']['_id'] ?? map['sender']['id'])?.toString()
+              : map['senderId']?.toString();
+
+          if (cipherText != null && cipherText.isNotEmpty && senderId != null) {
+            // Ensure a Signal/X3DH session exists with the sender before decrypting.
+
+            // Use force=true to re-process the sender's prekey bundle and replace any stale session.
+            try {
+              await E2EService.buildSession(senderId, token, force: true);
+            } catch (e) {
+              try { debugPrint('E2EService.buildSession failed for $senderId: ${e.toString()}'); } catch (_) {}
+            }
+
+            try {
+              // pass token so decrypt can attempt session rebuild+retry on Bad Mac
+              final plain = await E2EService.decrypt(senderId, cipherText, contentType, token: token);
+              onIncoming({...map, 'text': plain, 'cipherText': null});
+            } catch (e, st) {
+              try { debugPrint('E2EService.decrypt failed (socket) for $senderId: ${e.toString()}'); } catch (_) {}
+              try { debugPrint(st.toString()); } catch (_) {}
+              // Deliver a clear fallback so UI shows decryption failure instead of raw cipher.
+              onIncoming({...map, 'text': '[Could not decrypt]'});
+            }
+          } else {
+            onIncoming(data);
+          }
+        } catch (_) {
+          onIncoming(data); // fallback to raw
+        }
+      });
     }
 
     if (onStatus != null) {
@@ -104,7 +159,16 @@ class ChatSocket {
 
     _socket!.connect();
   }
-
+  // final Map<String, String> _pubKeyCache = {};
+  // Future<String> _fetchPubKey(String userId) async {
+  //   if (_pubKeyCache.containsKey(userId)) return _pubKeyCache[userId]!;
+  //   final res = await http.get(Uri.parse(
+  //       'https://chatterly-backend-f9j0.onrender.com/api/keys/$userId'),
+  //       headers: {'Authorization': 'Bearer $token'});
+  //   final key = jsonDecode(res.body)['publicKey'] as String;
+  //   _pubKeyCache[userId] = key;
+  //   return key;
+  // }
 
   void emitTypingStart(String? roomId) {
     if (roomId == null) return;

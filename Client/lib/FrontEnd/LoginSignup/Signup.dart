@@ -17,6 +17,7 @@ class _SignupPageState extends State<SignupPage> {
   final _formKey = GlobalKey<FormState>();
   String email = '';
   String password = '';
+  String name =  '';
   String confirmPassword = '';
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
@@ -24,6 +25,7 @@ class _SignupPageState extends State<SignupPage> {
 
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _name = TextEditingController();
   final String signupUrl = 'https://chatterly-backend-f9j0.onrender.com/api/auth/signup';
 
 
@@ -39,7 +41,9 @@ class _SignupPageState extends State<SignupPage> {
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'email': _emailController.text,
-          'password': _passwordController.text
+          'password': _passwordController.text,
+          'name': _name.text
+
         }),
       );
       print(response.body); // Debug network result
@@ -79,6 +83,7 @@ class _SignupPageState extends State<SignupPage> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _name.dispose();
     super.dispose();
   }
 
@@ -276,13 +281,56 @@ class _SignupPageState extends State<SignupPage> {
                                     ),
                                   ),
                                   SizedBox(height: 6),
+                                  // SizedBox(
+                                  //   height: 36,
+                                  //   child: TextFormField(
+                                  //     obscureText: _obscureConfirmPassword,
+                                  //     style: TextStyle(color: mutedColor, fontSize: 13),
+                                  //     decoration: InputDecoration(
+                                  //       hintText: "Confirm password",
+                                  //       filled: true,
+                                  //       fillColor: Colors.white.withOpacity(0.02),
+                                  //       contentPadding: EdgeInsets.symmetric(vertical: 4, horizontal: 12),
+                                  //       border: OutlineInputBorder(
+                                  //         borderRadius: BorderRadius.circular(99),
+                                  //         borderSide: BorderSide(color: Colors.white.withOpacity(0.06)),
+                                  //       ),
+                                  //       focusedBorder: OutlineInputBorder(
+                                  //         borderRadius: BorderRadius.circular(99),
+                                  //         borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
+                                  //       ),
+                                  //       suffixIcon: IconButton(
+                                  //         icon: Icon(
+                                  //           _obscureConfirmPassword ? Icons.visibility_off : Icons.visibility,
+                                  //           color: goldStrong, size: 19,
+                                  //         ),
+                                  //         onPressed: () {
+                                  //           setState(() {
+                                  //             _obscureConfirmPassword = !_obscureConfirmPassword;
+                                  //           });
+                                  //         },
+                                  //       ),
+                                  //     ),
+                                  //     validator: (value) {
+                                  //       if (value == null || value.isEmpty) {
+                                  //         return 'Please confirm your password';
+                                  //       }
+                                  //       if (value != _passwordController.text) {
+                                  //         return 'Passwords do not match';
+                                  //       }
+                                  //       return null;
+                                  //     },
+                                  //     onSaved: (val) => confirmPassword = val!,
+                                  //   ),
+                                  // ),
                                   SizedBox(
                                     height: 36,
                                     child: TextFormField(
-                                      obscureText: _obscureConfirmPassword,
+                                      controller: _name,
+                                      // obscureText: _obscurePassword,
                                       style: TextStyle(color: mutedColor, fontSize: 13),
                                       decoration: InputDecoration(
-                                        hintText: "Confirm password",
+                                        hintText: "Name",
                                         filled: true,
                                         fillColor: Colors.white.withOpacity(0.02),
                                         contentPadding: EdgeInsets.symmetric(vertical: 4, horizontal: 12),
@@ -294,28 +342,28 @@ class _SignupPageState extends State<SignupPage> {
                                           borderRadius: BorderRadius.circular(99),
                                           borderSide: BorderSide(color: Colors.white.withOpacity(0.2)),
                                         ),
-                                        suffixIcon: IconButton(
-                                          icon: Icon(
-                                            _obscureConfirmPassword ? Icons.visibility_off : Icons.visibility,
-                                            color: goldStrong, size: 19,
-                                          ),
-                                          onPressed: () {
-                                            setState(() {
-                                              _obscureConfirmPassword = !_obscureConfirmPassword;
-                                            });
-                                          },
-                                        ),
+                                        // suffixIcon: IconButton(
+                                        //   icon: Icon(
+                                        //     _obscurePassword ? Icons.visibility_off : Icons.visibility,
+                                        //     color: goldStrong, size: 19,
+                                        //   ),
+                                        //   onPressed: () {
+                                        //     setState(() {
+                                        //       _obscurePassword = !_obscurePassword;
+                                        //     });
+                                        //   },
+                                        // ),
                                       ),
                                       validator: (value) {
                                         if (value == null || value.isEmpty) {
-                                          return 'Please confirm your password';
+                                          return 'Please enter your NAME';
                                         }
-                                        if (value != _passwordController.text) {
-                                          return 'Passwords do not match';
-                                        }
+                                        // if (value.length < 6) {
+                                        //   return 'Password must be at least 6 characters';
+                                        // }
                                         return null;
                                       },
-                                      onSaved: (val) => confirmPassword = val!,
+                                      onSaved: (val) => name = val!,
                                     ),
                                   ),
                                   SizedBox(height: 10),
