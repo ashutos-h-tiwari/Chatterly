@@ -22,7 +22,9 @@ class ChatApi {
   static String _convSend(String roomId) =>
       '$_base/api/chat/conversations/$roomId/messages';
 
-  Future<Map<String, dynamic>> createOrGetConversation(String participantId) async {
+  Future<Map<String, dynamic>> createOrGetConversation(
+    String participantId,
+  ) async {
     final uri = Uri.parse(_convPlural);
 
     Future<http.Response> _post() => http.post(
@@ -42,23 +44,34 @@ class ChatApi {
     throw Exception('Conversation error: ${resp.statusCode} ${resp.body}');
   }
 
-  Future<List<ChatMessage>> loadMessages(String roomId,
-      {String? before, int limit = 30, String? myUserId}) async {
-    final uri = Uri.parse(_convMessages(roomId)).replace(queryParameters: {
-      if (before != null) 'before': before,
-      'limit': '$limit',
-    });
+  Future<List<ChatMessage>> loadMessages(
+    String roomId, {
+    String? before,
+    int limit = 30,
+    String? myUserId,
+  }) async {
+    final uri = Uri.parse(_convMessages(roomId)).replace(
+      queryParameters: {
+        if (before != null) 'before': before,
+        'limit': '$limit',
+      },
+    );
 
     http.Response res = await http.get(uri, headers: _headersJsonAccept);
     if (res.statusCode == 404) {
-      res = await http.get(Uri.parse(_convOne(roomId)), headers: _headersJsonAccept);
+      res = await http.get(
+        Uri.parse(_convOne(roomId)),
+        headers: _headersJsonAccept,
+      );
     }
     if (res.statusCode >= 200 && res.statusCode < 300) {
       final body = jsonDecode(res.body);
       List list;
       if (body is Map && body['messages'] is List) {
         list = body['messages'] as List;
-      } else if (body is Map && body['data'] is Map && body['data']['messages'] is List) {
+      } else if (body is Map &&
+          body['data'] is Map &&
+          body['data']['messages'] is List) {
         list = body['data']['messages'] as List;
       } else if (body is Map && body['data'] is List) {
         list = body['data'] as List;
@@ -68,22 +81,35 @@ class ChatApi {
         list = const [];
       }
       return list
-          .map((m) => ChatMessage.fromJson(asStringKeyMap(m), myUserId: myUserId))
+          .map(
+            (m) => ChatMessage.fromJson(asStringKeyMap(m), myUserId: myUserId),
+          )
           .toList();
     }
     throw Exception('Load messages failed: ${res.statusCode}');
   }
 
-  Future<ChatMessage> sendText(String roomId,
-      {required String text, required String clientId, String? replyTo, String? myUserId}) async {
+  Future<ChatMessage> sendText(
+    String roomId, {
+    String? text,
+    String? cipherText,
+    String? contentType,
+    required String clientId,
+    String? replyTo,
+    String? myUserId,
+  }) async {
+    final body = {
+      'clientId': clientId,
+      if (replyTo != null) 'replyTo': replyTo,
+      if (cipherText != null) 'cipherText': cipherText,
+      if (contentType != null) 'contentType': contentType,
+      if (cipherText == null && text != null) 'text': text,
+    };
+
     final resp = await http.post(
       Uri.parse(_convSend(roomId)),
       headers: _headersJson,
-      body: jsonEncode({
-        'text': text,
-        'clientId': clientId,
-        if (replyTo != null) 'replyTo': replyTo,
-      }),
+      body: jsonEncode(body),
     );
 
     if (resp.statusCode >= 200 && resp.statusCode < 300) {
@@ -94,16 +120,18 @@ class ChatApi {
     throw Exception('Send text failed: ${resp.statusCode}');
   }
 
-  Future<ChatMessage> sendAttachment(String roomId,
-      {required dio.Dio dioClient,
-        required String clientId,
-        required String fileName,
-        required String mime,
-        List<int>? bytes,
-        String? filePath,
-        String? replyTo,
-        String? myUserId,
-        void Function(int sent, int total)? onProgress}) async {
+  Future<ChatMessage> sendAttachment(
+    String roomId, {
+    required dio.Dio dioClient,
+    required String clientId,
+    required String fileName,
+    required String mime,
+    List<int>? bytes,
+    String? filePath,
+    String? replyTo,
+    String? myUserId,
+    void Function(int sent, int total)? onProgress,
+  }) async {
     final formMap = {
       'clientId': clientId,
       if (replyTo != null) 'replyTo': replyTo,
@@ -112,11 +140,17 @@ class ChatApi {
     final media = MediaType.parse(mime);
     dio.MultipartFile mf;
     if (!kIsWeb && filePath != null) {
-      mf = await dio.MultipartFile.fromFile(filePath,
-          filename: fileName, contentType: media);
+      mf = await dio.MultipartFile.fromFile(
+        filePath,
+        filename: fileName,
+        contentType: media,
+      );
     } else if (bytes != null) {
-      mf = dio.MultipartFile.fromBytes(bytes,
-          filename: fileName, contentType: media);
+      mf = dio.MultipartFile.fromBytes(
+        bytes,
+        filename: fileName,
+        contentType: media,
+      );
     } else {
       throw Exception('No attachment data');
     }
@@ -132,7 +166,9 @@ class ChatApi {
       onSendProgress: onProgress,
     );
 
-    if (res.statusCode != null && res.statusCode! >= 200 && res.statusCode! < 300) {
+    if (res.statusCode != null &&
+        res.statusCode! >= 200 &&
+        res.statusCode! < 300) {
       final raw = res.data is String ? jsonDecode(res.data) : res.data;
       final obj = (raw is Map && raw['data'] is Map) ? raw['data'] : raw;
       return ChatMessage.fromJson(asStringKeyMap(obj), myUserId: myUserId);
@@ -154,7 +190,9 @@ class ChatApi {
   Map<String, dynamic> _unwrap(dynamic body) {
     if (body is Map) {
       if (body['conversation'] is Map) {
-        return (body['conversation'] as Map).map((k, v) => MapEntry(k.toString(), v));
+        return (body['conversation'] as Map).map(
+          (k, v) => MapEntry(k.toString(), v),
+        );
       }
       if (body['data'] is Map) {
         return (body['data'] as Map).map((k, v) => MapEntry(k.toString(), v));

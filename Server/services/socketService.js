@@ -4,7 +4,7 @@ import Conversation from "../models/Conversation.js";
 export const createMessageAndBroadcast = async (io, payload) => {
   console.log("🧩 Received payload:", payload);
 
-  const { conversationId, senderId, text, attachments } = payload;
+  const { conversationId, senderId, text, cipherText, contentType, attachments } = payload;
 
   if (!conversationId) {
     console.error("❌ Missing conversationId in payload");
@@ -15,7 +15,9 @@ export const createMessageAndBroadcast = async (io, payload) => {
   const message = new Message({
     conversationId,
     sender: senderId,
-    text: text || "",
+    cipherText: cipherText || null,
+    contentType: cipherText ? contentType || 'signal:whisper' : undefined,
+    text: cipherText ? undefined : text || "",
     attachments: attachments || []
   });
 

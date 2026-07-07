@@ -14,6 +14,7 @@ const userKeysSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", unique: true, required: true },
 
     identityKey: { type: String, required: true },            // base64 public
+      identitySigningKey: { type: String, required: false },   // base64 Ed25519 public (optional)
     signedPreKeyId: { type: Number, required: true },
     signedPreKeyPublic: { type: String, required: true },     // base64 public
     signedPreKeySignature: { type: String, required: true },  // base64

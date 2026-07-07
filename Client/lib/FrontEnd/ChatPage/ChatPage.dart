@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:chatterly/FrontEnd/ChatPage/Call/call_socket.dart';
 import 'services/chat_api.dart';
 import 'package:chatterly/FrontEnd/ChatPage/services/chat_socket.dart';
+import 'services/crypto_service.dart';
 
 import 'models/chat_message.dart';
 import 'models/message_status.dart';
@@ -50,7 +51,8 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, TickerProviderStateMixin {
+class _ChatPageState extends State<ChatPage>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   static const String _base = 'https://chatterly-backend-f9j0.onrender.com';
 
   final _dio = dio.Dio();
@@ -60,6 +62,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   late ChatApi _api;
   late ChatSocket _socketSvc;
+  late CryptoService _crypto;
   late CallSocket _callSocket; // call signalling socket
 
   String? _token;
@@ -115,7 +118,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   // Call UI state
   // bool _incomingDialogVisible = false;
   bool _incomingDialogVisible = false;
-  Map<String, dynamic>? _pendingOffer; // buffers SDP offer while ringing dialog is shown
+  Map<String, dynamic>?
+  _pendingOffer; // buffers SDP offer while ringing dialog is shown
   @override
   void initState() {
     super.initState();
@@ -212,12 +216,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _roomId != null) {
       try {
-        _socketSvc.rejoin(_roomId!);   // ✅ force unwrap
+        _socketSvc.rejoin(_roomId!); // ✅ force unwrap
         _socketSvc.markAllRead(_roomId);
       } catch (_) {}
     }
   }
-
 
   void _onFocusChanged() {
     setState(() {});
@@ -236,7 +239,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _token = prefs.getString('token');
       _myUserId = prefs.getString('userId');
 
-      if ((_token == null || _token!.isEmpty) || (_myUserId == null || _myUserId!.isEmpty)) {
+      if ((_token == null || _token!.isEmpty) ||
+          (_myUserId == null || _myUserId!.isEmpty)) {
         _snack('Please login again.');
         if (mounted) Navigator.of(context).pop();
         return;
@@ -250,6 +254,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _api = ChatApi(_token!);
       _socketSvc = ChatSocket(baseUrl: _base, token: _token!);
 
+      _crypto = CryptoService(_token!, _myUserId!);
+      await _crypto.init();
+
       // init call socket
       _callSocket = CallSocket(serverUrl: _base, token: _token!);
 
@@ -258,7 +265,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _registerCallSocketHandlers();
 
       final conv = await _api.createOrGetConversation(widget.chatUserId);
-      _roomId = (conv['_id'] ?? conv['id'] ?? conv['roomId'] ?? conv['conversationId'])?.toString();
+      _roomId =
+          (conv['_id'] ??
+                  conv['id'] ??
+                  conv['roomId'] ??
+                  conv['conversationId'])
+              ?.toString();
       if (_roomId == null || _roomId!.isEmpty) {
         _snack('Unable to create/find conversation');
         if (mounted) Navigator.of(context).pop();
@@ -267,7 +279,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _connectSocket();
       await _loadCached();
       await _loadMessages();
-
     } catch (e) {
       debugPrint('Bootstrap failed: $e');
       _snack('Setup failed: $e');
@@ -275,14 +286,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       if (mounted) setState(() => _loading = false);
     }
   }
+
   // ================== Socket (chat) ==================
   void _connectSocket() {
     if (_socketSvc.isConnected) return; // 👈 guard
 
     _socketSvc.connect(
       roomId: _roomId,
-      onIncoming: (data) {
+      onIncoming: (data) async {
         final map = asStringKeyMap(data);
+        // decrypt if needed
+        try {
+          if (map['cipherText'] != null && map['cipherText'] is String) {
+            final plain = await _crypto.decryptEnvelope(
+              map['cipherText'].toString(),
+            );
+            map['text'] = plain;
+          }
+        } catch (e) {
+          map['text'] = '[encrypted]';
+        }
         final incoming = ChatMessage.fromJson(map, myUserId: _myUserId);
         final incomingId = incoming.id;
 
@@ -339,13 +362,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         final status = _parseStatus(statusStr);
         final idx = _messages.indexWhere((m) => m.id == id);
         if (idx != -1 && mounted) {
-          setState(() => _messages[idx] = _messages[idx].copyWith(status: status));
+          setState(
+            () => _messages[idx] = _messages[idx].copyWith(status: status),
+          );
           _persistCache();
         }
       },
       onTypingStart: (data) {
         final m = (data is Map) ? data : {};
-        final cid = (m['conversationId'] ?? m['roomId'] ?? m['cid'])?.toString();
+        final cid = (m['conversationId'] ?? m['roomId'] ?? m['cid'])
+            ?.toString();
         if (_roomId != null && cid != null && cid != _roomId) return;
 
         final senderRaw = m['user'] ?? m['sender'] ?? m['from'] ?? m['userId'];
@@ -361,12 +387,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       },
       onTypingStop: (data) {
         final m = (data is Map) ? data : {};
-        final cid = (m['conversationId'] ?? m['roomId'] ?? m['cid'])?.toString();
+        final cid = (m['conversationId'] ?? m['roomId'] ?? m['cid'])
+            ?.toString();
         if (_roomId != null && cid != null && cid != _roomId) return;
         if (mounted) setState(() => _peerTyping = false);
       },
     );
   }
+
   Future<void> _loadCached() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_cacheKey);
@@ -376,7 +404,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       final msgs = list.map((m) => ChatMessage.fromCache(m)).toList();
       if (!mounted) return;
       setState(() {
-        _messages..clear()..addAll(msgs);
+        _messages
+          ..clear()
+          ..addAll(msgs);
       });
     } catch (_) {}
   }
@@ -390,10 +420,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   Future<void> _loadMessages({String? before}) async {
     if (_roomId == null) return;
     if (_loadingMore) return;
-    final msgs = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
+    final msgs = await _api.loadMessages(
+      _roomId!,
+      before: before,
+      limit: 30,
+      myUserId: _myUserId,
+    );
     setState(() {
       if (before == null) {
-        _messages..clear()..addAll(msgs);
+        _messages
+          ..clear()
+          ..addAll(msgs);
       } else {
         _messages.insertAll(0, msgs);
       }
@@ -401,10 +438,32 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _olderCursor = _messages.isNotEmpty ? _messages.first.id : null;
     });
     _persistCache();
+    // attempt to decrypt any loaded E2EE messages
+    _decryptLoadedMessages();
+  }
+
+  Future<void> _decryptLoadedMessages() async {
+    var changed = false;
+    for (var i = 0; i < _messages.length; i++) {
+      final m = _messages[i];
+      final text = m.text;
+      if (text.trim().startsWith('{') && text.contains('ephemeral')) {
+        try {
+          final plain = await _crypto.decryptEnvelope(text);
+          final updated = m.copyWith(text: plain);
+          if (mounted) setState(() => _messages[i] = updated);
+          changed = true;
+        } catch (_) {
+          // leave as is
+        }
+      }
+    }
+    if (changed) _persistCache();
   }
 
   Future<void> _loadMore() async {
-    if (!_hasMore || _loadingMore || _roomId == null || _messages.isEmpty) return;
+    if (!_hasMore || _loadingMore || _roomId == null || _messages.isEmpty)
+      return;
     setState(() => _loadingMore = true);
     try {
       await _loadMessages(before: _olderCursor);
@@ -419,8 +478,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _loadMore();
     }
   }
-
-
 
   MessageStatus _parseStatus(String s) {
     switch (s) {
@@ -469,9 +526,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       replyTo: _replyTo == null
           ? null
           : ReplyRef(
-        id: _replyTo!.id,
-        preview: _replyTo!.text.isNotEmpty ? _replyTo!.text : (_replyTo!.attachmentUrl ?? 'Attachment'),
-      ),
+              id: _replyTo!.id,
+              preview: _replyTo!.text.isNotEmpty
+                  ? _replyTo!.text
+                  : (_replyTo!.attachmentUrl ?? 'Attachment'),
+            ),
     );
 
     setState(() {
@@ -485,9 +544,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     _socketSvc.emitTypingStop(_roomId);
 
     try {
+      // encrypt before sending
+      final cipher = await _crypto.encryptFor(widget.chatUserId, text);
       final saved = await _api.sendText(
         _roomId!,
-        text: text,
+        cipherText: cipher,
+        contentType: 'e2ee',
         clientId: tempId,
         replyTo: pending.replyTo?.id,
         myUserId: _myUserId,
@@ -495,12 +557,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
       final i = _messages.indexWhere((m) => m.id == tempId);
       if (i != -1 && mounted) {
-        final fixedTs = resolveSendTimestamp(saved.timestamp, _messages[i].timestamp);
-        setState(() => _messages[i] = _messages[i].copyWith(
-          id: saved.id,
-          status: MessageStatus.sent,
-          timestamp: fixedTs,
-        ));
+        final fixedTs = resolveSendTimestamp(
+          saved.timestamp,
+          _messages[i].timestamp,
+        );
+        setState(
+          () => _messages[i] = _messages[i].copyWith(
+            id: saved.id,
+            status: MessageStatus.sent,
+            timestamp: fixedTs,
+          ),
+        );
         _persistCache();
       }
     } catch (e) {
@@ -524,14 +591,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     final tempId = UniqueKey().toString();
 
     setState(() {
-      _messages.add(ChatMessage(
-        id: tempId,
-        text: '📎 ${file.name}',
-        isSentByMe: true,
-        timestamp: DateTime.now(),
-        status: MessageStatus.sending,
-        uploadProgress: 0.0,
-      ));
+      _messages.add(
+        ChatMessage(
+          id: tempId,
+          text: '📎 ${file.name}',
+          isSentByMe: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sending,
+          uploadProgress: 0.0,
+        ),
+      );
     });
     _scrollToBottom();
     _persistCache();
@@ -552,7 +621,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             final p = sent / total;
             final i = _messages.indexWhere((m) => m.id == tempId);
             if (i != -1 && mounted) {
-              setState(() => _messages[i] = _messages[i].copyWith(uploadProgress: p));
+              setState(
+                () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
+              );
             }
           }
         },
@@ -560,7 +631,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
       final i = _messages.indexWhere((m) => m.id == tempId);
       if (i != -1 && mounted) {
-        setState(() => _messages[i] = saved.copyWith(status: MessageStatus.sent, uploadProgress: 1.0));
+        setState(
+          () => _messages[i] = saved.copyWith(
+            status: MessageStatus.sent,
+            uploadProgress: 1.0,
+          ),
+        );
         _persistCache();
       }
     } catch (e) {
@@ -602,16 +678,18 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     final tempId = UniqueKey().toString();
     final mime = 'audio/aac';
     setState(() {
-      _messages.add(ChatMessage(
-        id: tempId,
-        text: '🎤 Voice message',
-        isSentByMe: true,
-        timestamp: DateTime.now(),
-        status: MessageStatus.sending,
-        uploadProgress: 0.0,
-        attachmentUrl: newPath,
-        attachmentType: mime,
-      ));
+      _messages.add(
+        ChatMessage(
+          id: tempId,
+          text: '🎤 Voice message',
+          isSentByMe: true,
+          timestamp: DateTime.now(),
+          status: MessageStatus.sending,
+          uploadProgress: 0.0,
+          attachmentUrl: newPath,
+          attachmentType: mime,
+        ),
+      );
     });
     _scrollToBottom();
     _persistCache();
@@ -632,7 +710,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             final p = sent / total;
             final i = _messages.indexWhere((m) => m.id == tempId);
             if (i != -1 && mounted) {
-              setState(() => _messages[i] = _messages[i].copyWith(uploadProgress: p));
+              setState(
+                () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
+              );
             }
           }
         },
@@ -640,7 +720,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
       final i = _messages.indexWhere((m) => m.id == tempId);
       if (i != -1 && mounted) {
-        setState(() => _messages[i] = saved.copyWith(status: MessageStatus.sent, uploadProgress: 1.0));
+        setState(
+          () => _messages[i] = saved.copyWith(
+            status: MessageStatus.sent,
+            uploadProgress: 1.0,
+          ),
+        );
         _persistCache();
       }
     } catch (e) {
@@ -676,7 +761,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
   bool _isImageMessage(ChatMessage m) {
     final url = (m.attachmentUrl ?? '').toLowerCase();
     if (url.isEmpty) return false;
-    if (url.endsWith('.jpg') || url.endsWith('.jpeg') || url.endsWith('.png') || url.endsWith('.webp') || url.endsWith('.gif')) {
+    if (url.endsWith('.jpg') ||
+        url.endsWith('.jpeg') ||
+        url.endsWith('.png') ||
+        url.endsWith('.webp') ||
+        url.endsWith('.gif')) {
       return true;
     }
     final at = (m.attachmentType ?? '').toLowerCase();
@@ -739,7 +828,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         mimeType: mime,
         suggestedFileName: fileName,
         onProgress: (received, total) {
-          final pct = (total > 0) ? (received / total * 100).toStringAsFixed(0) : '';
+          final pct = (total > 0)
+              ? (received / total * 100).toStringAsFixed(0)
+              : '';
           if (pct.isNotEmpty) _snack('Downloading $fileName — $pct%');
         },
       );
@@ -768,7 +859,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
       final mime = m.attachmentType ?? guessMime(_deriveFileName(raw));
       final fileName = _deriveFileName(raw);
-      final saved = await MediaSaver.saveIncoming(source: raw, mimeType: mime, suggestedFileName: fileName);
+      final saved = await MediaSaver.saveIncoming(
+        source: raw,
+        mimeType: mime,
+        suggestedFileName: fileName,
+      );
       if (saved != null && mounted) _snack('Attachment saved: $fileName');
     } catch (e) {
       debugPrint('Auto-save failed: $e');
@@ -835,7 +930,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       _snack('Still setting up chat — please wait a moment.');
       return false;
     }
-    if (_token == null || _token!.isEmpty || _myUserId == null || _myUserId!.isEmpty || _roomId == null || _roomId!.isEmpty) {
+    if (_token == null ||
+        _token!.isEmpty ||
+        _myUserId == null ||
+        _myUserId!.isEmpty ||
+        _roomId == null ||
+        _roomId!.isEmpty) {
       _snack('Cannot start call: missing auth or conversation info.');
       return false;
     }
@@ -851,20 +951,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     }
 
     // Signal server
-    _callSocket.emitCallInitiate(to: widget.chatUserId, conversationId: _roomId!, callType: 'voice');
+    _callSocket.emitCallInitiate(
+      to: widget.chatUserId,
+      conversationId: _roomId!,
+      callType: 'voice',
+    );
 
     // Navigate with SHARED socket
     if (!mounted) return;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CallScreen(
-        localUserId: _myUserId!,
-        remoteUserId: widget.chatUserId,
-        conversationId: _roomId!,
-        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
-        isCaller: true,
-        video: false,
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          localUserId: _myUserId!,
+          remoteUserId: widget.chatUserId,
+          conversationId: _roomId!,
+          socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+          isCaller: true,
+          video: false,
+        ),
       ),
-    ));
+    );
   }
 
   Future<void> _startVideoCall() async {
@@ -875,19 +981,25 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       return;
     }
 
-    _callSocket.emitCallInitiate(to: widget.chatUserId, conversationId: _roomId!, callType: 'video');
+    _callSocket.emitCallInitiate(
+      to: widget.chatUserId,
+      conversationId: _roomId!,
+      callType: 'video',
+    );
 
     if (!mounted) return;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CallScreen(
-        localUserId: _myUserId!,
-        remoteUserId: widget.chatUserId,
-        conversationId: _roomId!,
-        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
-        isCaller: true,
-        video: true,
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          localUserId: _myUserId!,
+          remoteUserId: widget.chatUserId,
+          conversationId: _roomId!,
+          socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+          isCaller: true,
+          video: true,
+        ),
       ),
-    ));
+    );
   }
 
   void _registerCallSocketHandlers() {
@@ -896,9 +1008,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       debugPrint('CALL: incoming-call -> $map');
 
       // ignore if it's for other conversation
-      final convId = (map['conversationId'] ?? map['roomId'] ?? map['conversation'])?.toString();
+      final convId =
+          (map['conversationId'] ?? map['roomId'] ?? map['conversation'])
+              ?.toString();
       if (convId != null && _roomId != null && convId != _roomId) {
-        debugPrint('CALL: incoming-call for different conversation ($convId) — ignoring');
+        debugPrint(
+          'CALL: incoming-call for different conversation ($convId) — ignoring',
+        );
         return;
       }
 
@@ -913,12 +1029,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
           debugPrint('CALL: offer updated while dialog visible — buffering');
           _pendingOffer = Map<String, dynamic>.from(map['offer'] as Map);
         } else {
-          debugPrint('CALL: incoming dialog already visible — ignoring duplicate notifyOnly');
+          debugPrint(
+            'CALL: incoming dialog already visible — ignoring duplicate notifyOnly',
+          );
         }
         return;
       }
-      final from = (map['from'] ?? map['fromUserId'] ?? map['callerId'])?.toString() ?? '';
-      final fromName = (map['fromName'] ?? map['callerName'] ?? 'Caller').toString();
+      final from =
+          (map['from'] ?? map['fromUserId'] ?? map['callerId'])?.toString() ??
+          '';
+      final fromName = (map['fromName'] ?? map['callerName'] ?? 'Caller')
+          .toString();
       final callType = (map['callType'] ?? 'voice').toString();
       final callId = (map['callId'] ?? '').toString();
       _pendingOffer = map['offer'] != null
@@ -967,7 +1088,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
       builder: (dialogContext) => WillPopScope(
         onWillPop: () async => false,
         child: AlertDialog(
-          title: Text('Incoming ${callType == 'video' ? 'Video' : 'Voice'} call'),
+          title: Text(
+            'Incoming ${callType == 'video' ? 'Video' : 'Voice'} call',
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -980,13 +1103,20 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                     onPressed: () {
                       Navigator.of(dialogContext).pop();
                       _incomingDialogVisible = false;
-                      _acceptCall(callerId: callerId, callId: callId, callType: callType, payload: payload);
+                      _acceptCall(
+                        callerId: callerId,
+                        callId: callId,
+                        callType: callType,
+                        payload: payload,
+                      );
                     },
                     icon: const Icon(Icons.call),
                     label: const Text('Accept'),
                   ),
                   ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey,
+                    ),
                     onPressed: () {
                       Navigator.of(dialogContext).pop();
                       _incomingDialogVisible = false;
@@ -996,7 +1126,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                     label: const Text('Decline'),
                   ),
                 ],
-              )
+              ),
             ],
           ),
         ),
@@ -1006,26 +1136,39 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   void _declineCall({required String callerId, String? callId}) {
     debugPrint('CALL: decline -> to=$callerId callId=$callId');
-    _callSocket.emitDecline(to: callerId, conversationId: _roomId!, reason: 'declined');
+    _callSocket.emitDecline(
+      to: callerId,
+      conversationId: _roomId!,
+      reason: 'declined',
+    );
   }
 
-  Future<void> _acceptCall({required String callerId, String? callId, required String callType, Map<String, dynamic>? payload}) async {
+  Future<void> _acceptCall({
+    required String callerId,
+    String? callId,
+    required String callType,
+    Map<String, dynamic>? payload,
+  }) async {
     final ok = await _ensurePermissions(video: callType == 'video');
     if (!ok) {
-      _callSocket.emitDecline(to: callerId, conversationId: _roomId!, reason: 'permissions-denied');
+      _callSocket.emitDecline(
+        to: callerId,
+        conversationId: _roomId!,
+        reason: 'permissions-denied',
+      );
       return;
     }
 
     // Extract offer if it arrived with the call
     // final offerSdp = payload?['offer'];
-// Use buffered offer — it's the most up-to-date one received while dialog was showing
-//     final offerSdp = _pendingOffer ?? payload?['offer'];
-//     _pendingOffer = null; // clear after consuming
+    // Use buffered offer — it's the most up-to-date one received while dialog was showing
+    //     final offerSdp = _pendingOffer ?? payload?['offer'];
+    //     _pendingOffer = null; // clear after consuming
     // Unwrap offer safely — ensure we pass {sdp: "...", type: "offer"} not the raw payload
     dynamic rawOffer = _pendingOffer ?? payload?['offer'];
 
-// If rawOffer is already the correct map shape, use it
-// If it's nested (offer inside offer), unwrap
+    // If rawOffer is already the correct map shape, use it
+    // If it's nested (offer inside offer), unwrap
     if (rawOffer is Map && rawOffer['offer'] != null) {
       rawOffer = rawOffer['offer'];
     }
@@ -1036,31 +1179,35 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
     _pendingOffer = null;
     if (!mounted) return;
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => CallScreen(
-        localUserId: _myUserId!,
-        remoteUserId: callerId,
-        conversationId: _roomId!,
-        socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
-        isCaller: false,
-        video: callType == 'video',
-        initialOffer: offerSdp, // <--- Pass the offer to avoid "Waiting..." forever
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          localUserId: _myUserId!,
+          remoteUserId: callerId,
+          conversationId: _roomId!,
+          socket: _callSocket, // <--- THIS IS THE CRITICAL FIX
+          isCaller: false,
+          video: callType == 'video',
+          initialOffer:
+              offerSdp, // <--- Pass the offer to avoid "Waiting..." forever
+        ),
       ),
-    ));
+    );
   }
+
   // ---- Build helpers (header, messages, input) ----
   Widget _buildHeader() {
     final callEnabled = !_loading && _roomId != null && _myUserId != null;
     return FadeTransition(
       opacity: _headerController,
       child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, -1),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(
-          parent: _headerController,
-          curve: Curves.easeOutCubic,
-        )),
+        position: Tween<Offset>(begin: const Offset(0, -1), end: Offset.zero)
+            .animate(
+              CurvedAnimation(
+                parent: _headerController,
+                curve: Curves.easeOutCubic,
+              ),
+            ),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
@@ -1145,8 +1292,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                       _peerTyping ? 'typing...' : 'online',
                       style: TextStyle(
                         fontSize: 12,
-                        color: _peerTyping ? const Color(0xff0f766e) : const Color(0xff64748b),
-                        fontWeight: _peerTyping ? FontWeight.w600 : FontWeight.normal,
+                        color: _peerTyping
+                            ? const Color(0xff0f766e)
+                            : const Color(0xff64748b),
+                        fontWeight: _peerTyping
+                            ? FontWeight.w600
+                            : FontWeight.normal,
                       ),
                     ),
                   ],
@@ -1200,59 +1351,59 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
         Expanded(
           child: _messages.isEmpty
               ? Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: const Color(0xff0f766e).withOpacity(0.1),
-                    shape: BoxShape.circle,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          color: const Color(0xff0f766e).withOpacity(0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.chat_bubble_outline,
+                          size: 48,
+                          color: Color(0xff0f766e),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'No messages yet',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Color(0xff64748b),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Start the conversation!',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Color(0xff94a3b8),
+                        ),
+                      ),
+                    ],
                   ),
-                  child: const Icon(
-                    Icons.chat_bubble_outline,
-                    size: 48,
-                    color: Color(0xff0f766e),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'No messages yet',
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: Color(0xff64748b),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Start the conversation!',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Color(0xff94a3b8),
-                  ),
-                ),
-              ],
-            ),
-          )
+                )
               : MessageList(
-            messages: _messages,
-            onTap: (m) {
-              if (_isImageMessage(m)) {
-                _openImageViewer(m);
-              } else if (_isAudioMessage(m)) {
-                _playOrPauseAudioForMessage(m);
-              }
-            },
-            onSave: _saveAttachment,
-            onLongPress: _onMessageLongPress,
-            onPlay: _playOrPauseAudioForMessage,
-            isAudioMessage: _isAudioMessage,
-            maxBubbleWidth: maxBubbleWidth,
-            playingMessageId: _playingMessageId,
-            audioDuration: _audioDuration,
-            audioPosition: _audioPosition,
-          ),
+                  messages: _messages,
+                  onTap: (m) {
+                    if (_isImageMessage(m)) {
+                      _openImageViewer(m);
+                    } else if (_isAudioMessage(m)) {
+                      _playOrPauseAudioForMessage(m);
+                    }
+                  },
+                  onSave: _saveAttachment,
+                  onLongPress: _onMessageLongPress,
+                  onPlay: _playOrPauseAudioForMessage,
+                  isAudioMessage: _isAudioMessage,
+                  maxBubbleWidth: maxBubbleWidth,
+                  playingMessageId: _playingMessageId,
+                  audioDuration: _audioDuration,
+                  audioPosition: _audioPosition,
+                ),
         ),
         if (_peerTyping)
           Padding(
@@ -1260,7 +1411,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             child: Align(
               alignment: Alignment.centerLeft,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(20),
@@ -1282,13 +1436,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
 
   Widget _buildInputArea() {
     return SlideTransition(
-      position: Tween<Offset>(
-        begin: const Offset(0, 1),
-        end: Offset.zero,
-      ).animate(CurvedAnimation(
-        parent: _inputController,
-        curve: Curves.easeOutCubic,
-      )),
+      position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
+          .animate(
+            CurvedAnimation(
+              parent: _inputController,
+              curve: Curves.easeOutCubic,
+            ),
+          ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1331,7 +1485,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                       color: const Color(0xfff0fdf4),
                       borderRadius: BorderRadius.circular(24),
                       border: Border.all(
-                        color: _composerFocus.hasFocus ? const Color(0xff0f766e).withOpacity(0.3) : Colors.transparent,
+                        color: _composerFocus.hasFocus
+                            ? const Color(0xff0f766e).withOpacity(0.3)
+                            : Colors.transparent,
                         width: 2,
                       ),
                     ),
@@ -1359,14 +1515,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                         suffixIcon: _composer.text.isNotEmpty
                             ? null
                             : IconButton(
-                          icon: const Icon(
-                            Icons.emoji_emotions_outlined,
-                            color: Color(0xff64748b),
-                          ),
-                          onPressed: () {
-                            setState(() => _showEmojiPicker = !_showEmojiPicker);
-                          },
-                        ),
+                                icon: const Icon(
+                                  Icons.emoji_emotions_outlined,
+                                  color: Color(0xff64748b),
+                                ),
+                                onPressed: () {
+                                  setState(
+                                    () => _showEmojiPicker = !_showEmojiPicker,
+                                  );
+                                },
+                              ),
                       ),
                       onSubmitted: (_) => _sendText(),
                     ),
@@ -1377,35 +1535,40 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
                   duration: const Duration(milliseconds: 200),
                   child: _composer.text.trim().isEmpty
                       ? Container(
-                    decoration: BoxDecoration(
-                      color: _isRecording ? Colors.red[300] : const Color(0xff0f766e).withOpacity(0.1),
-                      shape: BoxShape.circle,
-                    ),
-                    child: GestureDetector(
-                      onLongPressStart: (_) => _startRecording(),
-                      onLongPressEnd: (_) => _stopRecordingAndSend(),
-                      onLongPressCancel: () => _cancelRecording(),
-                      child: Padding(
-                        padding: const EdgeInsets.all(8.0),
-                        child: Icon(
-                          _isRecording ? Icons.mic : Icons.mic_none,
-                          color: const Color(0xff0f766e),
-                        ),
-                      ),
-                    ),
-                  )
+                          decoration: BoxDecoration(
+                            color: _isRecording
+                                ? Colors.red[300]
+                                : const Color(0xff0f766e).withOpacity(0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: GestureDetector(
+                            onLongPressStart: (_) => _startRecording(),
+                            onLongPressEnd: (_) => _stopRecordingAndSend(),
+                            onLongPressCancel: () => _cancelRecording(),
+                            child: Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Icon(
+                                _isRecording ? Icons.mic : Icons.mic_none,
+                                color: const Color(0xff0f766e),
+                              ),
+                            ),
+                          ),
+                        )
                       : Container(
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [Color(0xff0f766e), Color(0xff14b8a6)],
-                      ),
-                      shape: BoxShape.circle,
-                    ),
-                    child: IconButton(
-                      icon: const Icon(Icons.send_rounded, color: Colors.white),
-                      onPressed: _sendText,
-                    ),
-                  ),
+                          decoration: const BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Color(0xff0f766e), Color(0xff14b8a6)],
+                            ),
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            icon: const Icon(
+                              Icons.send_rounded,
+                              color: Colors.white,
+                            ),
+                            onPressed: _sendText,
+                          ),
+                        ),
                 ),
               ],
             ),
@@ -1419,7 +1582,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
     final emoji = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1428,10 +1593,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
             Wrap(
               alignment: WrapAlignment.center,
               children: ['👍', '❤️', '😂', '😮', '😢', '🙏']
-                  .map((e) => Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: InkWell(onTap: () => Navigator.pop(context, e), child: Text(e, style: const TextStyle(fontSize: 24))),
-              ))
+                  .map(
+                    (e) => Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: InkWell(
+                        onTap: () => Navigator.pop(context, e),
+                        child: Text(e, style: const TextStyle(fontSize: 24)),
+                      ),
+                    ),
+                  )
                   .toList(),
             ),
             const Divider(),
@@ -1504,10 +1674,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver, Ticker
               Expanded(
                 child: _loading
                     ? const Center(
-                  child: CircularProgressIndicator(
-                    color: Color(0xff0f766e),
-                  ),
-                )
+                        child: CircularProgressIndicator(
+                          color: Color(0xff0f766e),
+                        ),
+                      )
                     : _buildMessagesList(maxBubbleWidth),
               ),
               _buildInputArea(),

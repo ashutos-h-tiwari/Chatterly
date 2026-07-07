@@ -40,6 +40,7 @@ dependencies:
   socket_io_client:
   libsignal_protocol_dart:
   flutter_secure_storage:
+  cryptography: ^3.0.0
   file_picker:
   url_launcher:
   photo_view:
