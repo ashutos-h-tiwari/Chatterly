@@ -18,26 +18,17 @@ const userKeysSchema = new mongoose.Schema(
       required: true,
     },
 
-<<<<<<< HEAD
-    identityKey: { type: String, required: true },            // base64 public
-      identitySigningKey: { type: String, required: false },   // base64 Ed25519 public (optional)
-    signedPreKeyId: { type: Number, required: true },
-    signedPreKeyPublic: { type: String, required: true },     // base64 public
-    signedPreKeySignature: { type: String, required: true },  // base64
-=======
-    // ── Signal Protocol fields ───────────────────────────────────────────
-    registrationId:        { type: Number },          // ADD: required by libsignal
-
+    // ── Signal Protocol fields (matches E2EService / keyRoutes.js) ───────
+    registrationId:        { type: Number, default: 0 },
     identityKey:           { type: String, required: true },   // base64 public
     signedPreKeyId:        { type: Number, required: true },
     signedPreKeyPublic:    { type: String, required: true },   // base64 public
     signedPreKeySignature: { type: String, required: true },   // base64
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
 
     oneTimePreKeys: [PreKeySchema],
 
     // ── Tracking ─────────────────────────────────────────────────────────
-    keysUploadedAt: { type: Date, default: Date.now }, // ADD: useful for key rotation
+    keysUploadedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
