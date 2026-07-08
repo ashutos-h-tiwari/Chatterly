@@ -5,7 +5,6 @@ import '../models/chat_message.dart';
 import '../services/chat_api.dart';
 import '../services/chat_socket.dart';
 import '../services/e2e/e2e_service.dart';
-import '../services/chat_api.dart';
 
 class MessageController {
   final ChatApi api;
@@ -19,11 +18,12 @@ class MessageController {
   });
 
   Future<List<ChatMessage>> loadMessages(
-    String roomId,
-    String senderUserId, {
-    String? before,
-    int limit = 30,
-  }) async {
+      String roomId,
+      String senderUserId, {
+        String? before,
+        int limit = 30,
+        List<ChatMessage> cached = const [],
+      }) async {
     final messages = await api.loadMessages(
       roomId,
       before: before,
@@ -34,23 +34,37 @@ class MessageController {
     // Build session first (needed to decrypt)
     await E2EService.buildSession(senderUserId, api.token);
 
+    final cachedById = {for (final m in cached) m.id: m};
+
     return Future.wait(
       messages.map((msg) async {
         final cipher = msg.cipherText;
         final contentType = msg.contentType ?? 'signal:whisper';
-        if (cipher != null && cipher.isNotEmpty && msg.senderId != myUserId) {
-          try {
-            final decrypted = await E2EService.decrypt(
-              senderUserId,
-              cipher,
-              contentType,
-            );
-            return msg.copyWith(text: decrypted);
-          } catch (_) {
-            return msg.copyWith(text: '[Could not decrypt]');
+        if (cipher == null || cipher.isEmpty) return msg;
+
+        if (msg.senderId == myUserId) {
+          // We can't re-decrypt our own outgoing ciphertext via the Signal
+          // receiving chain (same as WhatsApp: history for your own sent
+          // messages comes from your local store, not by decrypting the
+          // server's copy). Reuse whatever we already have cached.
+          final prev = cachedById[msg.id];
+          if (prev != null && prev.text.isNotEmpty && prev.cipherText == null) {
+            return msg.copyWith(text: prev.text);
           }
+          return msg;
         }
-        return msg;
+
+        try {
+          final decrypted = await E2EService.decrypt(
+            senderUserId,
+            cipher,
+            contentType,
+            token: api.token,
+          );
+          return msg.withDecryptedText(decrypted);
+        } catch (_) {
+          return msg.copyWith(text: '[Could not decrypt]');
+        }
       }),
     );
   }
@@ -94,5 +108,5 @@ class MessageController {
     return list.map((m) => ChatMessage.fromCache(m)).toList();
   }
 
-  // add sendText/sendAttachment wrappers which call api and return ChatMessage
+// add sendText/sendAttachment wrappers which call api and return ChatMessage
 }

@@ -2,68 +2,49 @@
 import express from "express";
 import { auth } from "../middlewares/authMiddleware.js";
 import UserKeys from "../models/UserKeys.js";
-import nacl from 'tweetnacl';
-
-function verifySignature(publicBase64, messageBase64, signatureBase64) {
-  try {
-    const pub = Buffer.from(publicBase64, 'base64');
-    const msg = Buffer.from(messageBase64, 'base64');
-    const sig = Buffer.from(signatureBase64, 'base64');
-    return nacl.sign.detached.verify(new Uint8Array(msg), new Uint8Array(sig), new Uint8Array(pub));
-  } catch (e) {
-    return false;
-  }
-}
 
 const router = express.Router();
 router.use(auth);
 
 // ── POST /api/keys/upload ────────────────────────────────────────────────
+// NOTE: standardized on libsignal's key bundle shape (matches E2EService in
+// the Flutter app). The signedPreKeySignature here is signed internally by
+// libsignal using the identity key (XEdDSA over Curve25519) — it is NOT a
+// separate Ed25519 signature, so we don't require/verify a second signing
+// key here. A client that wants to double-check authenticity of the bundle
+// can verify signedPreKeySignature against identityKey using Curve.verifySignature.
 router.post("/upload", async (req, res) => {
   try {
     const {
       registrationId,
       identityKey,
-      identitySigningPublic,
       signedPreKeyId,
       signedPreKeyPublic,
       signedPreKeySignature,
       oneTimePreKeys,
     } = req.body;
 
-<<<<<<< HEAD
-    if (!identityKey || !signedPreKeyId || !signedPreKeyPublic || !signedPreKeySignature || !identitySigningPublic) {
-      return res.status(400).json({ success: false, message: "Missing key material (require identitySigningPublic)" });
-    }
-
-    // verify signature of signedPreKeyPublic using provided identitySigningPublic
-    const ok = verifySignature(identitySigningPublic, signedPreKeyPublic, signedPreKeySignature);
-    if (!ok) {
-      return res.status(400).json({ success: false, message: 'signedPreKeySignature invalid' });
-=======
-    if (!identityKey || !signedPreKeyId || !signedPreKeyPublic || !signedPreKeySignature) {
+    if (!identityKey || signedPreKeyId === undefined || signedPreKeyId === null || !signedPreKeyPublic || !signedPreKeySignature) {
       return res.status(400).json({
         success: false,
-        message: "Missing required key material",
+        message: "Missing required key material (identityKey, signedPreKeyId, signedPreKeyPublic, signedPreKeySignature)",
       });
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
     }
 
     const update = {
       identityKey,
-      identitySigningKey: identitySigningPublic,
       signedPreKeyId,
       signedPreKeyPublic,
       signedPreKeySignature,
-      registrationId: registrationId || null,
+      registrationId: registrationId ?? 0,
       keysUploadedAt: new Date(),
     };
 
     if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length > 0) {
       update.oneTimePreKeys = oneTimePreKeys.map((k) => ({
-        keyId:     k.keyId,
+        keyId: k.keyId,
         publicKey: k.publicKey,
-        isUsed:    false,
+        isUsed: false,
       }));
     }
 
@@ -81,6 +62,29 @@ router.post("/upload", async (req, res) => {
   }
 });
 
+// Shared helper: pop one unused one-time prekey (or null) and return the bundle shape
+async function buildBundleResponse(keys) {
+  let oneTimePreKey = null;
+  const idx = (keys.oneTimePreKeys || []).findIndex((k) => !k.isUsed);
+  if (idx >= 0) {
+    oneTimePreKey = {
+      keyId: keys.oneTimePreKeys[idx].keyId,
+      publicKey: keys.oneTimePreKeys[idx].publicKey,
+    };
+    keys.oneTimePreKeys[idx].isUsed = true;
+    await keys.save();
+  }
+
+  return {
+    registrationId: keys.registrationId ?? 0,
+    identityKey: keys.identityKey,
+    signedPreKeyId: keys.signedPreKeyId,
+    signedPreKeyPublic: keys.signedPreKeyPublic,
+    signedPreKeySignature: keys.signedPreKeySignature,
+    oneTimePreKey,
+  };
+}
+
 // ── POST /api/keys/bundle ────────────────────────────────────────────────
 router.post("/bundle", async (req, res) => {
   try {
@@ -97,35 +101,7 @@ router.post("/bundle", async (req, res) => {
       });
     }
 
-    let oneTimePreKey = null;
-    const idx = (keys.oneTimePreKeys || []).findIndex((k) => !k.isUsed);
-    if (idx >= 0) {
-      oneTimePreKey = {
-        keyId:     keys.oneTimePreKeys[idx].keyId,
-        publicKey: keys.oneTimePreKeys[idx].publicKey,
-      };
-      keys.oneTimePreKeys[idx].isUsed = true;
-      await keys.save();
-    }
-
-    return res.json({
-      success: true,
-      data: {
-<<<<<<< HEAD
-        identityKey: keys.identityKey,
-        identitySigningPublic: keys.identitySigningKey,
-        signedPreKeyId: keys.signedPreKeyId,
-        signedPreKeyPublic: keys.signedPreKeyPublic,
-=======
-        registrationId:        keys.registrationId,
-        identityKey:           keys.identityKey,
-        signedPreKeyId:        keys.signedPreKeyId,
-        signedPreKeyPublic:    keys.signedPreKeyPublic,
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
-        signedPreKeySignature: keys.signedPreKeySignature,
-        oneTimePreKey,
-      },
-    });
+    return res.json({ success: true, data: await buildBundleResponse(keys) });
   } catch (e) {
     console.error("❌ keys/bundle error:", e);
     return res.status(500).json({ success: false, message: "Bundle fetch failed" });
@@ -140,28 +116,7 @@ router.get("/bundle/:userId", async (req, res) => {
       return res.status(404).json({ success: false, message: "No key bundle found." });
     }
 
-    let oneTimePreKey = null;
-    const idx = (keys.oneTimePreKeys || []).findIndex((k) => !k.isUsed);
-    if (idx >= 0) {
-      oneTimePreKey = {
-        keyId:     keys.oneTimePreKeys[idx].keyId,
-        publicKey: keys.oneTimePreKeys[idx].publicKey,
-      };
-      keys.oneTimePreKeys[idx].isUsed = true;
-      await keys.save();
-    }
-
-    return res.json({
-      success: true,
-      data: {
-        registrationId:        keys.registrationId,
-        identityKey:           keys.identityKey,
-        signedPreKeyId:        keys.signedPreKeyId,
-        signedPreKeyPublic:    keys.signedPreKeyPublic,
-        signedPreKeySignature: keys.signedPreKeySignature,
-        oneTimePreKey,
-      },
-    });
+    return res.json({ success: true, data: await buildBundleResponse(keys) });
   } catch (e) {
     console.error("❌ keys/bundle/:userId error:", e);
     return res.status(500).json({ success: false, message: "Bundle fetch failed" });

@@ -99,10 +99,12 @@ class ChatSocket {
 
           if (cipherText != null && cipherText.isNotEmpty && senderId != null) {
             // Ensure a Signal/X3DH session exists with the sender before decrypting.
-
-            // Use force=true to re-process the sender's prekey bundle and replace any stale session.
+            // Non-forced: reuse an existing session/ratchet if we have one.
+            // E2EService.decrypt already retries internally with a forced
+            // session rebuild if it hits an untrusted-identity or bad-MAC
+            // error, so we don't burn a one-time prekey on every message here.
             try {
-              await E2EService.buildSession(senderId, token, force: true);
+              await E2EService.buildSession(senderId, token);
             } catch (e) {
               try { debugPrint('E2EService.buildSession failed for $senderId: ${e.toString()}'); } catch (_) {}
             }

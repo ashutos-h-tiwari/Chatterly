@@ -15,7 +15,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:chatterly/FrontEnd/ChatPage/Call/call_socket.dart';
 import 'services/chat_api.dart';
 import 'package:chatterly/FrontEnd/ChatPage/services/chat_socket.dart';
-import 'services/crypto_service.dart';
 
 import 'models/chat_message.dart';
 import 'models/message_status.dart';
@@ -63,7 +62,6 @@ class _ChatPageState extends State<ChatPage>
 
   late ChatApi _api;
   late ChatSocket _socketSvc;
-  late CryptoService _crypto;
   late CallSocket _callSocket; // call signalling socket
 
   String? _token;
@@ -252,11 +250,11 @@ class _ChatPageState extends State<ChatPage>
       }
 
       _api = ChatApi(_token!);
+      // Generates/uploads this device's Signal identity + prekey bundle
+      // (only actually generates once — E2EService.initAndUpload is a no-op
+      // after the first successful run, see 'signal_initialized' flag).
       await E2EService.initAndUpload(_token!);
       _socketSvc = ChatSocket(baseUrl: _base, token: _token!);
-
-      _crypto = CryptoService(_token!, _myUserId!);
-      await _crypto.init();
 
       // init call socket
       _callSocket = CallSocket(serverUrl: _base, token: _token!);
@@ -268,15 +266,25 @@ class _ChatPageState extends State<ChatPage>
       final conv = await _api.createOrGetConversation(widget.chatUserId);
       _roomId =
           (conv['_id'] ??
-                  conv['id'] ??
-                  conv['roomId'] ??
-                  conv['conversationId'])
+              conv['id'] ??
+              conv['roomId'] ??
+              conv['conversationId'])
               ?.toString();
       if (_roomId == null || _roomId!.isEmpty) {
         _snack('Unable to create/find conversation');
         if (mounted) Navigator.of(context).pop();
         return;
       }
+
+      // Establish (or reuse) the Signal session with this peer before we try
+      // to send or decrypt anything. Non-forced: won't rebuild if we already
+      // have a session with them.
+      try {
+        await E2EService.buildSession(widget.chatUserId, _token!);
+      } catch (e) {
+        debugPrint('Initial buildSession failed (will retry on send/receive): $e');
+      }
+
       _connectSocket();
       await _loadCached();
       await _loadMessages();
@@ -295,18 +303,11 @@ class _ChatPageState extends State<ChatPage>
     _socketSvc.connect(
       roomId: _roomId,
       onIncoming: (data) async {
+        // ChatSocket already decrypts via E2EService before invoking this
+        // callback (it resolves 'text' from 'cipherText' using the Signal
+        // session, and falls back to '[Could not decrypt]' on failure), so
+        // there's no decryption to do here.
         final map = asStringKeyMap(data);
-        // decrypt if needed
-        try {
-          if (map['cipherText'] != null && map['cipherText'] is String) {
-            final plain = await _crypto.decryptEnvelope(
-              map['cipherText'].toString(),
-            );
-            map['text'] = plain;
-          }
-        } catch (e) {
-          map['text'] = '[encrypted]';
-        }
         final incoming = ChatMessage.fromJson(map, myUserId: _myUserId);
         final incomingId = incoming.id;
 
@@ -364,7 +365,7 @@ class _ChatPageState extends State<ChatPage>
         final idx = _messages.indexWhere((m) => m.id == id);
         if (idx != -1 && mounted) {
           setState(
-            () => _messages[idx] = _messages[idx].copyWith(status: status),
+                () => _messages[idx] = _messages[idx].copyWith(status: status),
           );
           _persistCache();
         }
@@ -420,7 +421,6 @@ class _ChatPageState extends State<ChatPage>
 
   Future<void> _loadMessages({String? before}) async {
     if (_roomId == null) return;
-<<<<<<< HEAD
     if (_loadingMore) return;
     final msgs = await _api.loadMessages(
       _roomId!,
@@ -428,31 +428,21 @@ class _ChatPageState extends State<ChatPage>
       limit: 30,
       myUserId: _myUserId,
     );
-=======
-    if (before != null && _loadingMore) return; // only guard pagination, not initial load
-
-    final raw = await _api.loadMessages(_roomId!, before: before, limit: 30, myUserId: _myUserId);
-
-    // ── E2EE: build session once, then decrypt every encrypted history msg ──
-    if (_token != null) {
-      try { await E2EService.buildSession(widget.chatUserId, _token!); } catch (_) {}
-    }
-    final msgs = await Future.wait(raw.map((msg) async {
-      final cipher = msg.cipherText;
-      final contentType = msg.contentType ?? 'signal:whisper';
-      if (cipher != null && cipher.isNotEmpty && msg.senderId != _myUserId) {
-        try {
-          final plain = await E2EService.decrypt(widget.chatUserId, cipher, contentType);
-          return msg.copyWith(text: plain);
-        } catch (_) {
-          return msg.copyWith(text: '[Could not decrypt]');
-        }
-      }
-      return msg;
-    }));
 
     if (!mounted) return;
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
+
+    // IMPORTANT: with the Signal double-ratchet, a session's "decrypt" side
+    // can only open messages that were sent TO you — you cannot re-decrypt
+    // your own previously-sent ciphertext from the server this way (this is
+    // also true for WhatsApp: history isn't re-derived from server
+    // ciphertext, it comes from the local on-device store). So before we
+    // swap in the freshly-fetched (still-encrypted) page, keep a lookup of
+    // whatever plaintext we already have cached locally for those ids and
+    // reuse it instead of clobbering it with ciphertext.
+    final cachedById = <String, ChatMessage>{
+      for (final m in _messages) m.id: m,
+    };
+
     setState(() {
       if (before == null) {
         _messages
@@ -466,23 +456,43 @@ class _ChatPageState extends State<ChatPage>
     });
     _persistCache();
     // attempt to decrypt any loaded E2EE messages
-    _decryptLoadedMessages();
+    await _decryptLoadedMessages(cachedById);
   }
 
-  Future<void> _decryptLoadedMessages() async {
+  Future<void> _decryptLoadedMessages(Map<String, ChatMessage> cachedById) async {
     var changed = false;
     for (var i = 0; i < _messages.length; i++) {
       final m = _messages[i];
-      final text = m.text;
-      if (text.trim().startsWith('{') && text.contains('ephemeral')) {
-        try {
-          final plain = await _crypto.decryptEnvelope(text);
-          final updated = m.copyWith(text: plain);
-          if (mounted) setState(() => _messages[i] = updated);
+      final cipher = m.cipherText;
+      if (cipher == null || cipher.isEmpty) continue;
+
+      if (m.isSentByMe) {
+        // Can't decrypt our own outgoing ciphertext via the receiving chain.
+        // Fall back to whatever plaintext we already cached for this id.
+        final cached = cachedById[m.id];
+        if (cached != null && cached.text.isNotEmpty && cached.cipherText == null) {
+          if (mounted) setState(() => _messages[i] = m.copyWith(text: cached.text));
           changed = true;
-        } catch (_) {
-          // leave as is
         }
+        continue;
+      }
+
+      try {
+        await E2EService.buildSession(widget.chatUserId, _token!);
+        final plain = await E2EService.decrypt(
+          widget.chatUserId,
+          cipher,
+          m.contentType ?? 'signal:whisper',
+          token: _token,
+        );
+        final updated = m.copyWith(text: plain, cipherText: null);
+        if (mounted) setState(() => _messages[i] = updated);
+        changed = true;
+      } catch (e) {
+        debugPrint('Failed to decrypt history message ${m.id}: $e');
+        final updated = m.copyWith(text: '[Could not decrypt]');
+        if (mounted) setState(() => _messages[i] = updated);
+        changed = true;
       }
     }
     if (changed) _persistCache();
@@ -508,7 +518,12 @@ class _ChatPageState extends State<ChatPage>
     if (idx == -1) return;
 
     // mark as sending
-    if (mounted) setState(() => _messages[idx] = _messages[idx].copyWith(status: MessageStatus.sending));
+    if (mounted)
+      setState(
+            () => _messages[idx] = _messages[idx].copyWith(
+          status: MessageStatus.sending,
+        ),
+      );
     _persistCache();
 
     try {
@@ -517,9 +532,8 @@ class _ChatPageState extends State<ChatPage>
 
       final saved = await _api.sendText(
         _roomId!,
-        text: m.text,
-        cipherText: encrypted['cipherText']!,
-        contentType: encrypted['contentType']!,
+        cipherText: encrypted['cipherText'],
+        contentType: encrypted['contentType'],
         clientId: m.id,
         recipientUserId: widget.chatUserId,
         replyTo: m.replyTo?.id,
@@ -527,12 +541,26 @@ class _ChatPageState extends State<ChatPage>
       );
 
       if (!mounted) return;
-      final fixedTs = resolveSendTimestamp(saved.timestamp, _messages[idx].timestamp);
-      setState(() => _messages[idx] = _messages[idx].copyWith(id: saved.id, status: MessageStatus.sent, timestamp: fixedTs));
+      final fixedTs = resolveSendTimestamp(
+        saved.timestamp,
+        _messages[idx].timestamp,
+      );
+      setState(
+            () => _messages[idx] = _messages[idx].copyWith(
+          id: saved.id,
+          status: MessageStatus.sent,
+          timestamp: fixedTs,
+        ),
+      );
       _persistCache();
     } catch (e, st) {
       debugPrint('Retry send failed: $e\n$st');
-      if (mounted) setState(() => _messages[idx] = _messages[idx].copyWith(status: MessageStatus.failed));
+      if (mounted)
+        setState(
+              () => _messages[idx] = _messages[idx].copyWith(
+            status: MessageStatus.failed,
+          ),
+        );
       _persistCache();
       _snack('Retry failed: ${e.toString().split('\n').first}');
     }
@@ -593,11 +621,11 @@ class _ChatPageState extends State<ChatPage>
       replyTo: _replyTo == null
           ? null
           : ReplyRef(
-              id: _replyTo!.id,
-              preview: _replyTo!.text.isNotEmpty
-                  ? _replyTo!.text
-                  : (_replyTo!.attachmentUrl ?? 'Attachment'),
-            ),
+        id: _replyTo!.id,
+        preview: _replyTo!.text.isNotEmpty
+            ? _replyTo!.text
+            : (_replyTo!.attachmentUrl ?? 'Attachment'),
+      ),
     );
 
     setState(() {
@@ -611,25 +639,14 @@ class _ChatPageState extends State<ChatPage>
     _socketSvc.emitTypingStop(_roomId);
 
     try {
-<<<<<<< HEAD
-      // encrypt before sending
-      final cipher = await _crypto.encryptFor(widget.chatUserId, text);
-      final saved = await _api.sendText(
-        _roomId!,
-        cipherText: cipher,
-        contentType: 'e2ee',
-=======
-      // ── E2EE: ensure session exists, then encrypt ──────────────────────
+      // encrypt before sending (Signal session with this peer, established
+      // during bootstrap / lazily rebuilt by buildSession if needed)
       await E2EService.buildSession(widget.chatUserId, _token!);
       final encrypted = await E2EService.encrypt(widget.chatUserId, text);
-      // encrypted = { 'cipherText': base64, 'contentType': 'signal:prekey'|'signal:whisper' }
-
       final saved = await _api.sendText(
         _roomId!,
-        text: text,                          // kept for UI / cache only
-        cipherText: encrypted['cipherText']!, // actual payload sent to server
-        contentType: encrypted['contentType']!,
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
+        cipherText: encrypted['cipherText'],
+        contentType: encrypted['contentType'],
         clientId: tempId,
         recipientUserId: widget.chatUserId,
         replyTo: pending.replyTo?.id,
@@ -643,7 +660,7 @@ class _ChatPageState extends State<ChatPage>
           _messages[i].timestamp,
         );
         setState(
-          () => _messages[i] = _messages[i].copyWith(
+              () => _messages[i] = _messages[i].copyWith(
             id: saved.id,
             status: MessageStatus.sent,
             timestamp: fixedTs,
@@ -662,7 +679,11 @@ class _ChatPageState extends State<ChatPage>
       // mark pending message as failed so UI shows retry affordance
       final iFail = _messages.indexWhere((m) => m.id == tempId);
       if (iFail != -1 && mounted) {
-        setState(() => _messages[iFail] = _messages[iFail].copyWith(status: MessageStatus.failed));
+        setState(
+              () => _messages[iFail] = _messages[iFail].copyWith(
+            status: MessageStatus.failed,
+          ),
+        );
         _persistCache();
       }
 
@@ -716,7 +737,7 @@ class _ChatPageState extends State<ChatPage>
             final i = _messages.indexWhere((m) => m.id == tempId);
             if (i != -1 && mounted) {
               setState(
-                () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
+                    () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
               );
             }
           }
@@ -726,7 +747,7 @@ class _ChatPageState extends State<ChatPage>
       final i = _messages.indexWhere((m) => m.id == tempId);
       if (i != -1 && mounted) {
         setState(
-          () => _messages[i] = saved.copyWith(
+              () => _messages[i] = saved.copyWith(
             status: MessageStatus.sent,
             uploadProgress: 1.0,
           ),
@@ -805,7 +826,7 @@ class _ChatPageState extends State<ChatPage>
             final i = _messages.indexWhere((m) => m.id == tempId);
             if (i != -1 && mounted) {
               setState(
-                () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
+                    () => _messages[i] = _messages[i].copyWith(uploadProgress: p),
               );
             }
           }
@@ -815,7 +836,7 @@ class _ChatPageState extends State<ChatPage>
       final i = _messages.indexWhere((m) => m.id == tempId);
       if (i != -1 && mounted) {
         setState(
-          () => _messages[i] = saved.copyWith(
+              () => _messages[i] = saved.copyWith(
             status: MessageStatus.sent,
             uploadProgress: 1.0,
           ),
@@ -1103,8 +1124,8 @@ class _ChatPageState extends State<ChatPage>
 
       // ignore if it's for other conversation
       final convId =
-          (map['conversationId'] ?? map['roomId'] ?? map['conversation'])
-              ?.toString();
+      (map['conversationId'] ?? map['roomId'] ?? map['conversation'])
+          ?.toString();
       if (convId != null && _roomId != null && convId != _roomId) {
         debugPrint(
           'CALL: incoming-call for different conversation ($convId) — ignoring',
@@ -1131,7 +1152,7 @@ class _ChatPageState extends State<ChatPage>
       }
       final from =
           (map['from'] ?? map['fromUserId'] ?? map['callerId'])?.toString() ??
-          '';
+              '';
       final fromName = (map['fromName'] ?? map['callerName'] ?? 'Caller')
           .toString();
       final callType = (map['callType'] ?? 'voice').toString();
@@ -1283,7 +1304,7 @@ class _ChatPageState extends State<ChatPage>
           isCaller: false,
           video: callType == 'video',
           initialOffer:
-              offerSdp, // <--- Pass the offer to avoid "Waiting..." forever
+          offerSdp, // <--- Pass the offer to avoid "Waiting..." forever
         ),
       ),
     );
@@ -1297,11 +1318,11 @@ class _ChatPageState extends State<ChatPage>
       child: SlideTransition(
         position: Tween<Offset>(begin: const Offset(0, -1), end: Offset.zero)
             .animate(
-              CurvedAnimation(
-                parent: _headerController,
-                curve: Curves.easeOutCubic,
-              ),
-            ),
+          CurvedAnimation(
+            parent: _headerController,
+            curve: Curves.easeOutCubic,
+          ),
+        ),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
@@ -1445,61 +1466,42 @@ class _ChatPageState extends State<ChatPage>
         Expanded(
           child: _messages.isEmpty
               ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(24),
-                        decoration: BoxDecoration(
-                          color: const Color(0xff0f766e).withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.chat_bubble_outline,
-                          size: 48,
-                          color: Color(0xff0f766e),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'No messages yet',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Color(0xff64748b),
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Start the conversation!',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Color(0xff94a3b8),
-                        ),
-                      ),
-                    ],
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: const Color(0xff0f766e).withOpacity(0.1),
+                    shape: BoxShape.circle,
                   ),
-                )
-              : MessageList(
-<<<<<<< HEAD
-                  messages: _messages,
-                  onTap: (m) {
-                    if (_isImageMessage(m)) {
-                      _openImageViewer(m);
-                    } else if (_isAudioMessage(m)) {
-                      _playOrPauseAudioForMessage(m);
-                    }
-                  },
-                  onSave: _saveAttachment,
-                  onLongPress: _onMessageLongPress,
-                  onPlay: _playOrPauseAudioForMessage,
-                  isAudioMessage: _isAudioMessage,
-                  maxBubbleWidth: maxBubbleWidth,
-                  playingMessageId: _playingMessageId,
-                  audioDuration: _audioDuration,
-                  audioPosition: _audioPosition,
+                  child: const Icon(
+                    Icons.chat_bubble_outline,
+                    size: 48,
+                    color: Color(0xff0f766e),
+                  ),
                 ),
-=======
+                const SizedBox(height: 16),
+                const Text(
+                  'No messages yet',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Color(0xff64748b),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Start the conversation!',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Color(0xff94a3b8),
+                  ),
+                ),
+              ],
+            ),
+          )
+              : MessageList(
             scrollController: _scroll,
             messages: _messages,
             onTap: (m) {
@@ -1519,7 +1521,6 @@ class _ChatPageState extends State<ChatPage>
             audioDuration: _audioDuration,
             audioPosition: _audioPosition,
           ),
->>>>>>> 37751586aba6bb6b8af6f403d2aabf6fcffb5386
         ),
         if (_peerTyping)
           Padding(
@@ -1554,11 +1555,11 @@ class _ChatPageState extends State<ChatPage>
     return SlideTransition(
       position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
           .animate(
-            CurvedAnimation(
-              parent: _inputController,
-              curve: Curves.easeOutCubic,
-            ),
-          ),
+        CurvedAnimation(
+          parent: _inputController,
+          curve: Curves.easeOutCubic,
+        ),
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1631,16 +1632,16 @@ class _ChatPageState extends State<ChatPage>
                         suffixIcon: _composer.text.isNotEmpty
                             ? null
                             : IconButton(
-                                icon: const Icon(
-                                  Icons.emoji_emotions_outlined,
-                                  color: Color(0xff64748b),
-                                ),
-                                onPressed: () {
-                                  setState(
-                                    () => _showEmojiPicker = !_showEmojiPicker,
-                                  );
-                                },
-                              ),
+                          icon: const Icon(
+                            Icons.emoji_emotions_outlined,
+                            color: Color(0xff64748b),
+                          ),
+                          onPressed: () {
+                            setState(
+                                  () => _showEmojiPicker = !_showEmojiPicker,
+                            );
+                          },
+                        ),
                       ),
                       onSubmitted: (_) => _sendText(),
                     ),
@@ -1651,40 +1652,40 @@ class _ChatPageState extends State<ChatPage>
                   duration: const Duration(milliseconds: 200),
                   child: _composer.text.trim().isEmpty
                       ? Container(
-                          decoration: BoxDecoration(
-                            color: _isRecording
-                                ? Colors.red[300]
-                                : const Color(0xff0f766e).withOpacity(0.1),
-                            shape: BoxShape.circle,
-                          ),
-                          child: GestureDetector(
-                            onLongPressStart: (_) => _startRecording(),
-                            onLongPressEnd: (_) => _stopRecordingAndSend(),
-                            onLongPressCancel: () => _cancelRecording(),
-                            child: Padding(
-                              padding: const EdgeInsets.all(8.0),
-                              child: Icon(
-                                _isRecording ? Icons.mic : Icons.mic_none,
-                                color: const Color(0xff0f766e),
-                              ),
-                            ),
-                          ),
-                        )
-                      : Container(
-                          decoration: const BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [Color(0xff0f766e), Color(0xff14b8a6)],
-                            ),
-                            shape: BoxShape.circle,
-                          ),
-                          child: IconButton(
-                            icon: const Icon(
-                              Icons.send_rounded,
-                              color: Colors.white,
-                            ),
-                            onPressed: _sendText,
-                          ),
+                    decoration: BoxDecoration(
+                      color: _isRecording
+                          ? Colors.red[300]
+                          : const Color(0xff0f766e).withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: GestureDetector(
+                      onLongPressStart: (_) => _startRecording(),
+                      onLongPressEnd: (_) => _stopRecordingAndSend(),
+                      onLongPressCancel: () => _cancelRecording(),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Icon(
+                          _isRecording ? Icons.mic : Icons.mic_none,
+                          color: const Color(0xff0f766e),
                         ),
+                      ),
+                    ),
+                  )
+                      : Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Color(0xff0f766e), Color(0xff14b8a6)],
+                      ),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      icon: const Icon(
+                        Icons.send_rounded,
+                        color: Colors.white,
+                      ),
+                      onPressed: _sendText,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -1711,13 +1712,13 @@ class _ChatPageState extends State<ChatPage>
               children: ['👍', '❤️', '😂', '😮', '😢', '🙏']
                   .map(
                     (e) => Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: InkWell(
-                        onTap: () => Navigator.pop(context, e),
-                        child: Text(e, style: const TextStyle(fontSize: 24)),
-                      ),
-                    ),
-                  )
+                  padding: const EdgeInsets.all(8.0),
+                  child: InkWell(
+                    onTap: () => Navigator.pop(context, e),
+                    child: Text(e, style: const TextStyle(fontSize: 24)),
+                  ),
+                ),
+              )
                   .toList(),
             ),
             const Divider(),
@@ -1790,10 +1791,10 @@ class _ChatPageState extends State<ChatPage>
               Expanded(
                 child: _loading
                     ? const Center(
-                        child: CircularProgressIndicator(
-                          color: Color(0xff0f766e),
-                        ),
-                      )
+                  child: CircularProgressIndicator(
+                    color: Color(0xff0f766e),
+                  ),
+                )
                     : _buildMessagesList(maxBubbleWidth),
               ),
               _buildInputArea(),
@@ -1804,4 +1805,3 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 }
-
